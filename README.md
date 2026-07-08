@@ -1,8 +1,8 @@
-# ntools
+# CV-FUN
 
-本地优先的桌面剪贴板历史与内容分析工具。`ntools` 记录你复制过的文本，提供搜索、预览、复制回剪贴板和基础内容解析能力，目标是在 macOS 和 Windows 上提供轻量、键盘友好、尊重隐私的剪贴板效率体验。
+本地优先的桌面剪贴板历史与内容分析工具。`cv-fun` 记录你复制过的文本，提供搜索、预览、复制回剪贴板和基础内容解析能力，目标是在 macOS 和 Windows 上提供轻量、键盘友好、尊重隐私的剪贴板效率体验。
 
-Local-first desktop clipboard history and content analysis. `ntools` records copied text, lets you search and reuse clipboard history, and provides lightweight local analysis for common text formats. The goal is a fast, keyboard-friendly, privacy-conscious clipboard utility for macOS and Windows.
+Local-first desktop clipboard history and content analysis. `cv-fun` records copied text, lets you search and reuse clipboard history, and provides lightweight local analysis for common text formats. The goal is a fast, keyboard-friendly, privacy-conscious clipboard utility for macOS and Windows.
 
 > 当前项目处于早期开发阶段，功能会持续迭代。README 中的“已实现”和“路线图”会尽量保持清晰边界。
 >
@@ -158,13 +158,13 @@ npm run build
 
 ## 使用方式 / Usage
 
-1. 启动 `ntools`。
+1. 启动 `cv-fun`。
 2. 正常复制文本。
 3. 在主窗口中搜索、查看和复用剪贴板历史。
 4. 选中历史项查看详情和本地分析结果。
 5. 需要时打开设置面板调整历史数量、快捷键和解析规则。
 
-1. Start `ntools`.
+1. Start `cv-fun`.
 2. Copy text as usual.
 3. Search, inspect, and reuse clipboard history in the main window.
 4. Select an item to view its details and local analysis results.
@@ -172,7 +172,7 @@ npm run build
 
 ## 数据与隐私 / Data And Privacy
 
-`ntools` 的当前实现默认将历史和配置保存在本机，不依赖云端服务。
+`cv-fun` 的当前实现默认将历史和配置保存在本机，不依赖云端服务。
 
 The current implementation stores history and settings locally by default and does not depend on cloud services.
 
@@ -180,8 +180,8 @@ The current implementation stores history and settings locally by default and do
 
 Common paths are derived from the current user's system directories:
 
-- 配置文件 / Config file: `ntools/config.json`
-- 历史文件 / History file: `ntools/clipboard-history.json`
+- 配置文件 / Config file: `cv-fun/config.json`
+- 历史文件 / History file: `cv-fun/clipboard-history.json`
 
 实际完整路径由 Go 的 `os.UserConfigDir` 决定，不同平台会不同。
 
