@@ -41,5 +41,5 @@ func debugLogPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(configDir, "ntools", "debug.log"), nil
+	return filepath.Join(configDir, "cv-fun", "debug.log"), nil
 }

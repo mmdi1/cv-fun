@@ -35,7 +35,7 @@ func mainWindowOptions() application.WebviewWindowOptions {
 	)
 
 	return application.WebviewWindowOptions{
-		Title: "ntools",
+		Title: "cv-fun",
 		// Window sized to the golden ratio (1000 / 618 ≈ 1.618).
 		Width:         width,
 		Height:        height,
@@ -67,21 +67,21 @@ func main() {
 
 	historyPath, err := clipboardHistoryPath()
 	if err != nil {
-		debugPrintf("[ntools] clipboard history disabled: %v\n", err)
+		debugPrintf("[cv-fun] clipboard history disabled: %v\n", err)
 		log.Printf("clipboard history disabled: %v", err)
 	} else {
-		debugPrintf("[ntools] clipboard history path: %s\n", historyPath)
+		debugPrintf("[cv-fun] clipboard history path: %s\n", historyPath)
 	}
 
 	configPath, err := appConfigPath()
 	if err != nil {
-		debugPrintf("[ntools] config disabled: %v\n", err)
+		debugPrintf("[cv-fun] config disabled: %v\n", err)
 		log.Printf("config disabled: %v", err)
 	}
 	configStore := newConfigStore(configPath)
 	config, err := configStore.Load()
 	if err != nil {
-		debugPrintf("[ntools] config load failed, using defaults: %v\n", err)
+		debugPrintf("[cv-fun] config load failed, using defaults: %v\n", err)
 		log.Printf("config load failed, using defaults: %v", err)
 		config = defaultAppConfig()
 	}
@@ -96,7 +96,7 @@ func main() {
 	// 'Bind' is a list of Go struct instances. The frontend has access to the methods of these instances.
 	// 'Mac' options tailor the application when running an macOS.
 	app := application.New(application.Options{
-		Name:        "ntools",
+		Name:        "cv-fun",
 		Description: "A demo of using raw HTML & CSS",
 		Icon:        appIcon,
 		Services: []application.Service{
@@ -121,7 +121,7 @@ func main() {
 			if _, err := history.AddText(record.Text); err != nil {
 				return err
 			}
-			debugPrintf("[ntools] clipboard history written: %s\n", historyPath)
+			debugPrintf("[cv-fun] clipboard history written: %s\n", historyPath)
 			return nil
 		},
 		OnHistoryChange: func() {
@@ -131,12 +131,12 @@ func main() {
 		Debounce: 150 * time.Millisecond,
 	})
 	if err := startCopyShortcutListener(copyMonitor.HandleCopyShortcut); err != nil {
-		debugPrintf("[ntools] copy shortcut listener disabled: %v\n", err)
+		debugPrintf("[cv-fun] copy shortcut listener disabled: %v\n", err)
 		log.Printf("copy shortcut listener disabled: %v", err)
-		debugPrintf("[ntools] clipboard polling fallback enabled\n")
+		debugPrintf("[cv-fun] clipboard polling fallback enabled\n")
 		startClipboardPolling(readSystemClipboardText, copyMonitor.HandleCopiedText, 500*time.Millisecond)
 	} else {
-		debugPrintf("[ntools] copy shortcut listener enabled\n")
+		debugPrintf("[cv-fun] copy shortcut listener enabled\n")
 	}
 
 	// Create a new window with the necessary options.

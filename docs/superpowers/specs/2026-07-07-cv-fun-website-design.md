@@ -1,13 +1,13 @@
-# ntools Website Design
+# cv-fun Website Design
 
 ## Goal
 
-Create a concise, polished product homepage for `ntools` in the `website` Vue app.
+Create a concise, polished product homepage for `cv-fun` in the `website` Vue app.
 The page should feel like an external product launch page, not an internal roadmap.
 
 ## Source Context
 
-The product plan describes `ntools` as a macOS/Windows clipboard productivity tool.
+The product plan describes `cv-fun` as a macOS/Windows clipboard productivity tool.
 Its first milestone is a Maccy-style clipboard history panel, with later parsing features for copied timestamps, dates, English words, URLs, JSON, Base64, UUIDs, and colors.
 
 The homepage should communicate these product principles:
@@ -25,7 +25,7 @@ Use the "minimal product launch page" approach:
 - Black/white theme system with a visible theme toggle.
 - Thin lines, restrained surfaces, and high-contrast typography.
 - A first-screen product signal built around a realistic clipboard panel preview.
-- Copy that presents `ntools` as a focused, useful product.
+- Copy that presents `cv-fun` as a focused, useful product.
 - No colorful gradients, marketing illustration, or game-like visual language.
 
 The reference project `/Users/chsoxy/code/fmo.re/nfun` is used for structural inspiration only:
@@ -41,12 +41,12 @@ The reference project `/Users/chsoxy/code/fmo.re/nfun` is used for structural in
 The single-page homepage will include:
 
 1. Fixed top navigation
-   - Brand: `ntools`
+   - Brand: `cv-fun`
    - Anchor links: history, parsing, privacy, roadmap
    - Theme toggle: switches between black and white themes.
 
 2. Hero
-   - Headline: positions `ntools` as a lightweight clipboard assistant.
+   - Headline: positions `cv-fun` as a lightweight clipboard assistant.
    - Supporting copy: local-first, keyboard-first, clipboard history plus parsing.
    - Primary action: jump to feature overview.
    - Secondary action: jump to roadmap.

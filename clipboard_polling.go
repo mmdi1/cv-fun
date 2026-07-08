@@ -12,7 +12,7 @@ func startClipboardPolling(readClipboard func() (string, bool), onText func(stri
 	}
 
 	clipboard.StartPolling(readClipboard, func(text string) {
-		debugPrintf("[ntools] clipboard changed via polling\n")
+		debugPrintf("[cv-fun] clipboard changed via polling\n")
 		onText(text)
 	}, interval)
 }

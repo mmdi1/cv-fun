@@ -6,9 +6,9 @@ import (
 )
 
 const (
-	macBundleRelaunchEnv = "NTOOLS_BUNDLE_REEXEC"
-	macBundleIdentifier  = "com.chsoxy.ntools"
-	macBundleName        = "ntools"
+	macBundleRelaunchEnv = "CV_FUN_BUNDLE_REEXEC"
+	macBundleIdentifier  = "com.chsoxy.cv-fun"
+	macBundleName        = "cv-fun"
 )
 
 type macBundleLaunchPlan struct {

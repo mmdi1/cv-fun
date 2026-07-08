@@ -78,7 +78,7 @@ func appConfigPath() (string, error) {
 		return "", err
 	}
 
-	return filepath.Join(configDir, "ntools", "config.json"), nil
+	return filepath.Join(configDir, "cv-fun", "config.json"), nil
 }
 
 func newConfigStore(path string) *configStore {

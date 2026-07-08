@@ -1,4 +1,4 @@
-# CV-FUN
+# cv-fun
 
 本地优先的桌面剪贴板历史与内容分析工具。`cv-fun` 记录你复制过的文本，提供搜索、预览、复制回剪贴板和基础内容解析能力，目标是在 macOS 和 Windows 上提供轻量、键盘友好、尊重隐私的剪贴板效率体验。
 
@@ -256,6 +256,6 @@ npm run build
 
 ## License
 
-当前仓库尚未包含 LICENSE 文件。开源发布前建议补充明确许可证，例如 MIT、Apache-2.0 或 GPL 系列许可证。
+本项目基于 MIT License 开源。详情见 [LICENSE](LICENSE)。
 
-This repository does not include a LICENSE file yet. Add an explicit license before public release, such as MIT, Apache-2.0, or a GPL-family license.
+This project is open-sourced under the MIT License. See [LICENSE](LICENSE) for details.

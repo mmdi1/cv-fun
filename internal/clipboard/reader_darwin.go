@@ -8,7 +8,7 @@ package clipboard
 
 #import <Cocoa/Cocoa.h>
 
-const char* ntoolsClipboardText() {
+const char* cvfunClipboardText() {
 	NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
 	NSString *text = [pasteboard stringForType:NSPasteboardTypeString];
 	return [text UTF8String];
@@ -17,7 +17,7 @@ const char* ntoolsClipboardText() {
 import "C"
 
 func ReadText() (string, bool) {
-	text := C.ntoolsClipboardText()
+	text := C.cvfunClipboardText()
 	if text == nil {
 		return "", false
 	}

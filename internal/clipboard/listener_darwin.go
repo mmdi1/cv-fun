@@ -82,11 +82,11 @@ func StartCopyShortcutListener(onCopy func()) error {
 	}
 
 	trusted := bool(C.requestAccessibilityTrust())
-	logDebug("[ntools] macOS accessibility trusted: %v\n", trusted)
+	logDebug("[cv-fun] macOS accessibility trusted: %v\n", trusted)
 
 	eventTap := C.createCopyEventTap()
 	if unsafe.Pointer(eventTap) == nil {
-		return errors.New("failed to create macOS copy shortcut event tap; grant Accessibility permission to ntools")
+		return errors.New("failed to create macOS copy shortcut event tap; grant Accessibility permission to cv-fun")
 	}
 
 	darwinCopyShortcutHandler.Store(onCopy)
@@ -99,12 +99,12 @@ func StartCopyShortcutListener(onCopy func()) error {
 //export goKeyDown
 func goKeyDown(keycode C.int64_t, flags C.uint64_t) {
 	code := int64(keycode)
-	logDebug("[ntools] key down: key=%s keycode=%d modifiers=%s flags=0x%x\n", macKeyName(code), code, formatMacModifiers(uint64(flags)), uint64(flags))
+	logDebug("[cv-fun] key down: key=%s keycode=%d modifiers=%s flags=0x%x\n", macKeyName(code), code, formatMacModifiers(uint64(flags)), uint64(flags))
 }
 
 //export goCopyShortcutPressed
 func goCopyShortcutPressed() {
-	logDebug("[ntools] copy shortcut detected\n")
+	logDebug("[cv-fun] copy shortcut detected\n")
 	handler, ok := darwinCopyShortcutHandler.Load().(func())
 	if ok {
 		go handler()

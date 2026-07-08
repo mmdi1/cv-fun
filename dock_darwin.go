@@ -8,7 +8,7 @@ package main
 
 #import <AppKit/AppKit.h>
 
-static void ntoolsSetDockPolicyAccessory(void) {
+static void cvfunSetDockPolicyAccessory(void) {
 	void (^applyPolicy)(void) = ^{
 		[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 	};
@@ -20,7 +20,7 @@ static void ntoolsSetDockPolicyAccessory(void) {
 	}
 }
 
-static void ntoolsSetDockPolicyRegular(void) {
+static void cvfunSetDockPolicyRegular(void) {
 	void (^applyPolicy)(void) = ^{
 		[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 	};
@@ -32,7 +32,7 @@ static void ntoolsSetDockPolicyRegular(void) {
 	}
 }
 
-static void ntoolsApplyApplicationIcon(void *icon, int length) {
+static void cvfunApplyApplicationIcon(void *icon, int length) {
 	if (icon == NULL || length <= 0) {
 		return;
 	}
@@ -52,7 +52,7 @@ static void ntoolsApplyApplicationIcon(void *icon, int length) {
 	}
 }
 
-static NSImage* ntoolsImageFromBytes(void *icon, int length) {
+static NSImage* cvfunImageFromBytes(void *icon, int length) {
 	if (icon == NULL || length <= 0) {
 		return nil;
 	}
@@ -60,14 +60,14 @@ static NSImage* ntoolsImageFromBytes(void *icon, int length) {
 	return [[NSImage alloc] initWithData:data];
 }
 
-static void ntoolsApplyWindowAnimationIcon(void *window, void *icon, int length) {
+static void cvfunApplyWindowAnimationIcon(void *window, void *icon, int length) {
 	if (window == NULL || icon == NULL || length <= 0) {
 		return;
 	}
 
 	void (^applyIcon)(void) = ^{
 		NSWindow *nsWindow = (NSWindow *)window;
-		NSImage *image = ntoolsImageFromBytes(icon, length);
+		NSImage *image = cvfunImageFromBytes(icon, length);
 		if (image != nil) {
 			[nsWindow setMiniwindowImage:image];
 		}
@@ -80,7 +80,7 @@ static void ntoolsApplyWindowAnimationIcon(void *window, void *icon, int length)
 	}
 }
 
-static void ntoolsDisableWindowAnimations(void *window) {
+static void cvfunDisableWindowAnimations(void *window) {
 	if (window == NULL) {
 		return;
 	}
@@ -97,7 +97,7 @@ static void ntoolsDisableWindowAnimations(void *window) {
 	}
 }
 
-static void ntoolsShowWindowWithoutAnimation(void *window) {
+static void cvfunShowWindowWithoutAnimation(void *window) {
 	if (window == NULL) {
 		return;
 	}
@@ -121,7 +121,7 @@ static void ntoolsShowWindowWithoutAnimation(void *window) {
 	}
 }
 
-static void ntoolsHideWindowWithoutAnimation(void *window) {
+static void cvfunHideWindowWithoutAnimation(void *window) {
 	if (window == NULL) {
 		return;
 	}
@@ -143,7 +143,7 @@ static void ntoolsHideWindowWithoutAnimation(void *window) {
 	}
 }
 
-static void ntoolsHidePanelWithoutDockBounce(void *window) {
+static void cvfunHidePanelWithoutDockBounce(void *window) {
 	if (window == NULL) {
 		return;
 	}
@@ -176,13 +176,13 @@ import (
 
 func hideDockIcon() {
 	application.InvokeSync(func() {
-		C.ntoolsSetDockPolicyAccessory()
+		C.cvfunSetDockPolicyAccessory()
 	})
 }
 
 func showDockIcon() {
 	application.InvokeSync(func() {
-		C.ntoolsSetDockPolicyRegular()
+		C.cvfunSetDockPolicyRegular()
 	})
 }
 
@@ -191,7 +191,7 @@ func applyAppIcon(icon []byte) {
 		return
 	}
 	application.InvokeSync(func() {
-		C.ntoolsApplyApplicationIcon(unsafe.Pointer(&icon[0]), C.int(len(icon)))
+		C.cvfunApplyApplicationIcon(unsafe.Pointer(&icon[0]), C.int(len(icon)))
 	})
 }
 
@@ -204,7 +204,7 @@ func applyWindowAnimationIcon(window application.Window, icon []byte) {
 		return
 	}
 	application.InvokeSync(func() {
-		C.ntoolsApplyWindowAnimationIcon(nativeWindow, unsafe.Pointer(&icon[0]), C.int(len(icon)))
+		C.cvfunApplyWindowAnimationIcon(nativeWindow, unsafe.Pointer(&icon[0]), C.int(len(icon)))
 	})
 }
 
@@ -214,7 +214,7 @@ func disableWindowAnimations(window application.Window) {
 		return
 	}
 	application.InvokeSync(func() {
-		C.ntoolsDisableWindowAnimations(nativeWindow)
+		C.cvfunDisableWindowAnimations(nativeWindow)
 	})
 }
 
@@ -227,7 +227,7 @@ func showWindowWithoutAnimation(window application.Window) {
 		return
 	}
 	application.InvokeSync(func() {
-		C.ntoolsShowWindowWithoutAnimation(nativeWindow)
+		C.cvfunShowWindowWithoutAnimation(nativeWindow)
 	})
 }
 
@@ -240,7 +240,7 @@ func hideWindowWithoutAnimation(window application.Window) {
 		return
 	}
 	application.InvokeSync(func() {
-		C.ntoolsHideWindowWithoutAnimation(nativeWindow)
+		C.cvfunHideWindowWithoutAnimation(nativeWindow)
 	})
 }
 
@@ -254,7 +254,7 @@ func hidePanelWithoutDockBounce(window application.Window) {
 		return
 	}
 	application.InvokeSync(func() {
-		C.ntoolsHidePanelWithoutDockBounce(nativeWindow)
+		C.cvfunHidePanelWithoutDockBounce(nativeWindow)
 	})
 }
 

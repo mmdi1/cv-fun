@@ -136,7 +136,7 @@ onUnmounted(() => {
     <section class="workspace">
       <header class="topbar">
         <div>
-          <p class="eyebrow">ntools clipboard</p>
+          <p class="eyebrow">cv-fun clipboard</p>
           <h1>剪贴板历史</h1>
         </div>
         <div class="topbar-actions">

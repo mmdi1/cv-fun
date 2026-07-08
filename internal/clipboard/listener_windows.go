@@ -89,7 +89,7 @@ func windowsKeyboardProc(nCode int, wParam uintptr, lParam uintptr) uintptr {
 	if nCode >= 0 && (wParam == wmKeyDown || wParam == wmSysKeyDown) {
 		event := (*keyboardHookEvent)(unsafe.Pointer(lParam))
 		if event.VKCode == vkC && isControlPressed() {
-			logDebug("[ntools] copy shortcut detected\n")
+			logDebug("[cv-fun] copy shortcut detected\n")
 			handler, ok := windowsCopyShortcutHandle.Load().(func())
 			if ok {
 				go handler()

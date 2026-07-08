@@ -11,5 +11,5 @@ func DefaultPath() (string, error) {
 		return "", err
 	}
 
-	return filepath.Join(configDir, "ntools", "clipboard-history.json"), nil
+	return filepath.Join(configDir, "cv-fun", "clipboard-history.json"), nil
 }

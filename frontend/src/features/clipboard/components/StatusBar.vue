@@ -16,7 +16,7 @@ defineProps<{
     <span v-else-if="loading">加载中...</span>
     <span v-else-if="lastLoadedAt">最后刷新 {{ formatDateTime(lastLoadedAt.toISOString()) }}</span>
     <span v-else>等待剪贴板变化</span>
-    <span class="storage-path">~/Library/Application Support/ntools/clipboard-history.json</span>
+    <span class="storage-path">~/Library/Application Support/cv-fun/clipboard-history.json</span>
   </footer>
 </template>
 

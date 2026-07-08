@@ -120,8 +120,8 @@ func TestTrayMenuLabelsExposeShowAndQuit(t *testing.T) {
 	if len(labels) != 2 {
 		t.Fatalf("expected two menu labels, got %#v", labels)
 	}
-	if labels[0] != "显示 ntools" {
-		t.Fatalf("expected first tray menu label to show ntools, got %q", labels[0])
+	if labels[0] != "显示 cv-fun" {
+		t.Fatalf("expected first tray menu label to show cv-fun, got %q", labels[0])
 	}
 	if labels[1] != "退出" {
 		t.Fatalf("expected second tray menu label to quit, got %q", labels[1])
@@ -197,14 +197,14 @@ func TestDarwinPanelHideCombinesDockPolicyAndWindowOrdering(t *testing.T) {
 	}
 	code := string(source)
 
-	if !strings.Contains(code, "ntoolsHidePanelWithoutDockBounce") {
+	if !strings.Contains(code, "cvfunHidePanelWithoutDockBounce") {
 		t.Fatalf("expected a native helper that hides the Dock icon and window together")
 	}
-	helperStart := strings.Index(code, "static void ntoolsHidePanelWithoutDockBounce")
+	helperStart := strings.Index(code, "static void cvfunHidePanelWithoutDockBounce")
 	if helperStart < 0 {
 		t.Fatalf("expected native hide-panel helper definition")
 	}
-	helperEnd := strings.Index(code[helperStart:], "static void ntools")
+	helperEnd := strings.Index(code[helperStart:], "static void cvfun")
 	if helperEnd <= 0 {
 		helperEnd = len(code) - helperStart
 	}

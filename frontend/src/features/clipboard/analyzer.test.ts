@@ -11,12 +11,12 @@ test('formats second-level unix timestamps', () => {
 })
 
 test('formats valid JSON and reports its shape', () => {
-  const cards = analyzeClipboardText('{"name":"ntools","items":[1,2]}')
+  const cards = analyzeClipboardText('{"name":"cv-fun","items":[1,2]}')
   const jsonCard = cards.find((card) => card.type === 'json')
 
   assert.ok(jsonCard)
   assert.equal(jsonCard.title, 'JSON')
-  assert.match(jsonCard.value, /"name": "ntools"/)
+  assert.match(jsonCard.value, /"name": "cv-fun"/)
   assert.equal(jsonCard.hint, '对象格式有效')
 })
 

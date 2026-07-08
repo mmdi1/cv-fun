@@ -63,7 +63,7 @@ func (l *trayLifecycle) handleTrayClick(isWindowVisible func() bool, restoreAppI
 }
 
 func trayMenuLabels() []string {
-	return []string{"显示 ntools", "退出"}
+	return []string{"显示 cv-fun", "退出"}
 }
 
 func newTrayMenu(lifecycle *trayLifecycle, showWindow func(), quitApp func()) *application.Menu {
@@ -107,7 +107,7 @@ func setupSystemTray(app *application.App, window application.Window, icon []byt
 	})
 
 	tray := app.SystemTray.New()
-	tray.SetTooltip("ntools")
+	tray.SetTooltip("cv-fun")
 	if len(icon) > 0 {
 		if runtime.GOOS == "darwin" {
 			tray.SetTemplateIcon(icon)

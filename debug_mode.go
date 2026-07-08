@@ -7,18 +7,18 @@ import (
 )
 
 func runCopyDebugMode() bool {
-	if os.Getenv("NTOOLS_COPY_DEBUG") != "1" {
+	if os.Getenv("CV_FUN_COPY_DEBUG") != "1" {
 		return false
 	}
 
-	fmt.Println("[ntools] copy debug mode enabled")
-	fmt.Println("[ntools] press keys now; press Enter here to exit")
+	fmt.Println("[cv-fun] copy debug mode enabled")
+	fmt.Println("[cv-fun] press keys now; press Enter here to exit")
 
 	done := make(chan struct{})
 	if err := startCopyShortcutListener(func() {
-		fmt.Println("[ntools] debug copy callback fired")
+		fmt.Println("[cv-fun] debug copy callback fired")
 	}); err != nil {
-		fmt.Printf("[ntools] debug listener failed: %v\n", err)
+		fmt.Printf("[cv-fun] debug listener failed: %v\n", err)
 		return true
 	}
 
@@ -28,6 +28,6 @@ func runCopyDebugMode() bool {
 	}()
 
 	<-done
-	fmt.Println("[ntools] copy debug mode stopped")
+	fmt.Println("[cv-fun] copy debug mode stopped")
 	return true
 }
