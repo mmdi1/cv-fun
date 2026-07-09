@@ -1,44 +1,128 @@
+# =========================
+# 趣剪 (nfun-cv) — Tauri 2 + Vue 3 + Rust
+# =========================
+
+# ----- Dependencies -----
+node_modules/
+.pnpm-store/
+.yarn/
+.yarn/cache
+.pnp.*
+
+# ----- Frontend build / Vite -----
+dist/
+dist-ssr/
+*.local
+.vite/
+.turbo/
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+
+# ----- Rust / Cargo / Tauri -----
+src-tauri/target/
+**/target/
+# Keep lockfiles in repo for reproducible builds:
+# Cargo.lock (binary crates) and package-lock.json are tracked.
+
+# Generated Tauri schemas (local gen; may be recreated)
+# src-tauri/gen/ is useful for some workflows; ignore heavy build only.
+src-tauri/gen/schemas/*.json.bak
+
+# ----- Logs & debug -----
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.log.*
+
+# ----- Env & secrets -----
+.env
+.env.*
+!.env.example
+!.env*.example
+*.pem
+*.key
+credentials.json
+auth.json
+secrets/
+
+# ----- Editor / IDE -----
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-*
+
+# ----- OS junk -----
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ----- Test / coverage -----
+coverage/
+.nyc_output/
+*.lcov
+.vitest/
+playwright-report/
+test-results/
+.hypothesis/
+
+# ----- Tauri / packaging artifacts -----
+*.dmg
+*.app
+*.AppImage
+*.deb
+*.rpm
+*.msi
 *.exe
 *.exe~
-*.dll
-*.so
-*.dylib
+*.nsis
+*.wixpdb
+src-tauri/WixTools/
+bundle/
+# Local release outputs sometimes dropped at repo root
+/release/
+/out/
 
-# Test binary, built with `go test -c`
-*.test
+# ----- Misc local tooling -----
+.history/
+.task/
+.gocache/
+.direnv/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.grok/
+.agent/
+.agents/
 
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
-
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
-go.work
-logs/
-pids/
-*.log
-cmd_server
-test/
-/data
-logs/*
-.env
-node_moduls
-api/proto-gen-go
-api/protoc-gen-go
-api/proto
-api/swagger
-api-gateway/pb
-build
-node_modules
-shared/docker-compose/kafka-mongo-cdc
-shared/docker-compose/data
-shared/docker-compose/conf/keyfile
-*.wt
-realxx-service/reports/pprof
-img
-.history
-.gocache
-小说
-bin/*
-.task
+# ----- Temporary / scratch -----
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.orig
+.fusebox/
+.serverless/
+.tern-port
+.vscode-test/
+)
