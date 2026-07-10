@@ -205,7 +205,7 @@ pub fn run() {
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon)
                 .menu(&menu)
-                .tooltip("趣剪")
+                .tooltip("FunCV")
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "settings" => {
@@ -294,7 +294,7 @@ pub fn run() {
             commands::show_main_window,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building 趣剪");
+        .expect("error while building FunCV");
 
     app.run(|app_handle, event| {
         match event {

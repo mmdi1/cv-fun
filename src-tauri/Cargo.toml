@@ -1,7 +1,7 @@
 [package]
 name = "nfun-cv"
 version = "0.1.0"
-description = "趣剪 - 本地优先剪贴板历史与内容分析"
+description = "FunCV - 本地优先剪贴板历史与内容分析"
 authors = ["NFUN"]
 edition = "2021"
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "趣剪",
+  "productName": "FunCV",
   "version": "0.1.0",
   "identifier": "com.nfun.cv",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "趣剪",
+        "title": "FunCV",
         "width": 960,
         "height": 640,
         "resizable": true,

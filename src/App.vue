@@ -86,7 +86,7 @@ onUnmounted(() => {
       <div class="brand" data-tauri-drag-region>
         <img class="mark" src="/appicon.png" width="32" height="32" alt="" draggable="false" />
         <div class="brand-text" data-tauri-drag-region>
-          <h1>趣剪</h1>
+          <h1>FunCV</h1>
           <p>本地剪贴板</p>
         </div>
       </div>

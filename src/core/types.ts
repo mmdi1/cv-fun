@@ -1,4 +1,4 @@
-/** Shared domain types for 趣剪 */
+/** Shared domain types for FunCV */
 
 export type ItemKind = "text" | "image";
 
