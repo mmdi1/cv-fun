@@ -4,10 +4,104 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/appicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>趣剪</title>
+    <title>FunCV</title>
+    <style>
+      /* Instant shell before Vue mounts — enables drag on frameless window immediately */
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #0b0f13;
+        color: #e8edf2;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      #app {
+        width: 100%;
+        height: 100%;
+      }
+      #boot {
+        height: 100%;
+        display: grid;
+        grid-template-rows: 52px 1fr;
+        user-select: none;
+      }
+      #boot-bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        -webkit-app-region: drag;
+        app-region: drag;
+      }
+      #boot-bar img {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+      }
+      #boot-bar strong {
+        font-size: 0.95rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      #boot-body {
+        display: grid;
+        place-content: center;
+        gap: 10px;
+        color: #7a8792;
+        font-size: 0.82rem;
+        -webkit-app-region: drag;
+        app-region: drag;
+      }
+      #boot-body span {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        margin: 0 2px;
+        border-radius: 50%;
+        background: #3ecfad;
+        opacity: 0.35;
+        animation: boot-pulse 1s ease-in-out infinite;
+      }
+      #boot-body span:nth-child(2) {
+        animation-delay: 0.15s;
+      }
+      #boot-body span:nth-child(3) {
+        animation-delay: 0.3s;
+      }
+      @keyframes boot-pulse {
+        0%,
+        100% {
+          opacity: 0.25;
+          transform: translateY(0);
+        }
+        50% {
+          opacity: 1;
+          transform: translateY(-3px);
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <!-- Shown until Vue replaces #app; drag works without waiting for JS bundle -->
+      <div id="boot" data-tauri-drag-region>
+        <div id="boot-bar" data-tauri-drag-region>
+          <img src="/appicon.png" width="28" height="28" alt="" draggable="false" />
+          <strong data-tauri-drag-region>FunCV</strong>
+        </div>
+        <div id="boot-body" data-tauri-drag-region>
+          <div>
+            <span></span><span></span><span></span>
+          </div>
+          <div>正在启动… 可拖动窗口</div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

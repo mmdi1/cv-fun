@@ -4,6 +4,24 @@ import * as api from "../api";
 import type { HistoryItem, PanelContent, ParseSuggestion } from "../core/types";
 import { resolveContent } from "../extensions";
 
+const CACHE_MAX = 100;
+
+/** Simple FIFO-ish cache trim (Map preserves insertion order). */
+function cacheSet<V>(map: Map<string, V>, key: string, value: V) {
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+  while (map.size > CACHE_MAX) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
+/**
+ * Parse cache policy:
+ * - Built-in extensions (JSON/SQL/…): once per content hash.
+ * - Plugins: once per (content hash + enabled plugin set); re-run only when plugins change.
+ */
 export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err") => void) {
   const query = ref("");
   const items = ref<HistoryItem[]>([]);
@@ -11,13 +29,27 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
   const hasLoaded = ref(false);
   const selectedId = ref("");
   const imageSrc = ref("");
-  /** True while fetching full text body for the selected text item. */
   const hydrating = ref(false);
 
   const appliedSuggestionId = ref<string | null>(null);
   const appliedBody = ref<string | null>(null);
-  /** Results from universal plugins (Rust / node / python / …) */
+  /**
+   * Right-panel draft text (text items only).
+   * Editing is ephemeral — does NOT write back to history DB.
+   */
+  const editorText = ref("");
+  /** True when panel draft differs from stored original. */
+  const editorDirty = ref(false);
+
+  const builtinSuggestions = ref<ParseSuggestion[]>([]);
   const pluginSuggestions = ref<ParseSuggestion[]>([]);
+
+  /** contentHash → builtin suggestions */
+  const builtinCache = new Map<string, ParseSuggestion[]>();
+  /** `${contentHash}::${pluginSig}` → plugin suggestions */
+  const pluginCache = new Map<string, ParseSuggestion[]>();
+  /** Enabled plugin fingerprint; null = not loaded yet */
+  let pluginSig: string | null = null;
 
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let hydrateToken = 0;
@@ -27,36 +59,53 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     () => items.value.find((i) => i.id === selectedId.value) ?? items.value[0] ?? null,
   );
 
-  const resolved = computed(() => resolveContent(selectedItem.value));
-  const suggestions = computed(() => {
-    // Builtin TS analyzers first, then plugin results
-    return [...resolved.value.suggestions, ...pluginSuggestions.value];
-  });
+  const suggestions = computed(() => [
+    ...builtinSuggestions.value,
+    ...pluginSuggestions.value,
+  ]);
   const itemCountLabel = computed(() => `${items.value.length}`);
 
   const panelContent = computed((): PanelContent => {
     const item = selectedItem.value;
     if (!item) return { mode: "empty" };
     if (item.kind === "image") return { mode: "image" };
-
-    if (appliedBody.value != null) {
-      return { mode: "plain", body: appliedBody.value };
+    if (hydrating.value && item.text == null) {
+      return { mode: "plain", body: "加载中…" };
     }
-    // List summaries omit text until hydrated
-    if (item.text == null) {
-      return { mode: "plain", body: hydrating.value ? "加载中…" : "" };
-    }
-    return resolved.value.original;
+    // Editor is source of truth while viewing text
+    return { mode: "plain", body: editorText.value };
   });
 
   const isShowingOriginal = computed(() => appliedSuggestionId.value == null);
+  const isTextEditor = computed(
+    () => selectedItem.value?.kind === "text" && !hydrating.value,
+  );
 
   const formatBadge = computed(() => {
     if (!selectedItem.value) return "";
     if (selectedItem.value.kind === "image") return "图片";
+    if (editorDirty.value) return "草稿";
     if (!isShowingOriginal.value) return "解析";
     return "原文";
   });
+
+  function syncEditorFromItem(item: HistoryItem | null) {
+    if (!item || item.kind !== "text") {
+      editorText.value = "";
+      editorDirty.value = false;
+      return;
+    }
+    if (appliedBody.value != null) {
+      editorText.value = appliedBody.value;
+      editorDirty.value = appliedBody.value !== (item.text ?? "");
+    } else if (item.text != null) {
+      editorText.value = item.text;
+      editorDirty.value = false;
+    } else {
+      editorText.value = "";
+      editorDirty.value = false;
+    }
+  }
 
   function resetApplied() {
     appliedSuggestionId.value = null;
@@ -66,10 +115,21 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
   function applySuggestion(s: ParseSuggestion) {
     appliedSuggestionId.value = s.id;
     appliedBody.value = s.body;
-    setStatus(`已应用 · ${s.title}`, "ok");
+    editorText.value = s.body;
+    const orig = selectedItem.value?.text ?? "";
+    editorDirty.value = s.body !== orig;
+    setStatus(`已应用 · ${s.title}（不写入历史）`, "ok");
   }
 
-  /** Double-click a recommendation: show in panel and write result to clipboard. */
+  /** Local edit only — history row stays unchanged. */
+  function onEditorInput(value: string) {
+    editorText.value = value;
+    appliedSuggestionId.value = null;
+    appliedBody.value = null;
+    const orig = selectedItem.value?.text ?? "";
+    editorDirty.value = value !== orig;
+  }
+
   async function applyAndCopySuggestion(s: ParseSuggestion) {
     applySuggestion(s);
     const item = selectedItem.value;
@@ -87,6 +147,11 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
 
   function showOriginal() {
     resetApplied();
+    const item = selectedItem.value;
+    if (item?.kind === "text" && item.text != null) {
+      editorText.value = item.text;
+      editorDirty.value = false;
+    }
     setStatus("已恢复原文", "ok");
   }
 
@@ -97,14 +162,78 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     }
   }
 
-  /** Load full text body for selected text item (list omits text). */
+  function contentKey(item: HistoryItem): string {
+    return item.hash || item.id;
+  }
+
+  function pluginCacheKey(item: HistoryItem, sig: string): string {
+    return `${contentKey(item)}::${sig}`;
+  }
+
+  /** Built-in analyzers: parse once per content hash. */
+  function updateBuiltinForItem(item: HistoryItem | null) {
+    if (!item) {
+      builtinSuggestions.value = [];
+      return;
+    }
+    // Need full text for text analysis
+    if (item.kind === "text" && item.text == null) {
+      builtinSuggestions.value = [];
+      return;
+    }
+    const key = contentKey(item);
+    const hit = builtinCache.get(key);
+    if (hit) {
+      builtinSuggestions.value = hit;
+      return;
+    }
+    const resolved = resolveContent(item);
+    cacheSet(builtinCache, key, resolved.suggestions);
+    builtinSuggestions.value = resolved.suggestions;
+  }
+
+  async function ensurePluginSig(): Promise<string> {
+    if (pluginSig !== null) return pluginSig;
+    try {
+      const list = (await api.listPlugins()) || [];
+      pluginSig = list
+        .filter((p) => p.enabled)
+        .map((p) => `${p.id}@${p.version || "0"}`)
+        .sort()
+        .join("|");
+    } catch {
+      pluginSig = "";
+    }
+    return pluginSig;
+  }
+
+  /** Restore plugin suggestions from cache if present; returns true on hit. */
+  function tryRestorePluginCache(item: HistoryItem): boolean {
+    if (pluginSig === null) return false;
+    const key = pluginCacheKey(item, pluginSig);
+    const hit = pluginCache.get(key);
+    if (!hit) return false;
+    pluginSuggestions.value = hit;
+    return true;
+  }
+
   async function hydrateSelected() {
     const id = selectedId.value;
     if (!id) return;
     const item = items.value.find((i) => i.id === id);
-    if (!item || item.kind !== "text") return;
-    // Already has body
-    if (item.text != null) {
+    if (!item) return;
+
+    if (item.kind === "image") {
+      editorText.value = "";
+      editorDirty.value = false;
+      updateBuiltinForItem(item);
+      void runPluginsForSelected();
+      return;
+    }
+
+    if (item.kind === "text" && item.text != null) {
+      if (!editorDirty.value) syncEditorFromItem(item);
+      updateBuiltinForItem(item);
       void runPluginsForSelected();
       return;
     }
@@ -115,6 +244,8 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
       const full = await api.getHistoryItem(id);
       if (token !== hydrateToken || selectedId.value !== id) return;
       mergeItem(full);
+      if (!editorDirty.value) syncEditorFromItem(full);
+      updateBuiltinForItem(full);
       void runPluginsForSelected();
     } catch (error) {
       if (token === hydrateToken) {
@@ -125,29 +256,50 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     }
   }
 
+  /**
+   * Plugins: cache by content hash + enabled plugin set.
+   * Only re-invoke when cache miss (new content or plugins changed).
+   */
   async function runPluginsForSelected() {
     const item = selectedItem.value;
     if (!item) {
       pluginSuggestions.value = [];
       return;
     }
-    const token = ++pluginToken;
-    const type = item.kind === "image" ? "img" : "text";
-    let content = "";
-    if (item.kind === "text") {
-      content = item.text ?? "";
-      if (!content) {
-        pluginSuggestions.value = [];
-        return;
-      }
-    } else {
-      // img: pass image path if available; plugins may ignore
-      content = item.imagePath ?? item.id;
+
+    // Image plugins need path; text needs body
+    if (item.kind === "text" && item.text == null) {
+      return;
     }
+
+    const token = ++pluginToken;
+    const sig = await ensurePluginSig();
+    if (token !== pluginToken) return;
+
+    const key = pluginCacheKey(item, sig);
+    const cached = pluginCache.get(key);
+    if (cached) {
+      pluginSuggestions.value = cached;
+      return;
+    }
+
+    // Brief yield so selection paint stays smooth on first miss only
+    await new Promise<void>((r) => setTimeout(r, 50));
+    if (token !== pluginToken) return;
+
+    const type = item.kind === "image" ? "img" : "text";
+    const content =
+      item.kind === "text" ? (item.text ?? "") : (item.imagePath ?? item.id);
+    if (item.kind === "text" && !content) {
+      pluginSuggestions.value = [];
+      cacheSet(pluginCache, key, []);
+      return;
+    }
+
     try {
       const outs = (await api.runEnabledPlugins(content, type)) || [];
       if (token !== pluginToken) return;
-      pluginSuggestions.value = outs
+      const mapped: ParseSuggestion[] = outs
         .filter((o) => o.ok && o.body)
         .map((o) => ({
           id: `plugin:${o.pluginId}`,
@@ -157,8 +309,12 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
           hint: o.hint || "插件",
           recommended: o.pluginId === "translate-en-zh",
         }));
+      cacheSet(pluginCache, key, mapped);
+      pluginSuggestions.value = mapped;
     } catch {
-      if (token === pluginToken) pluginSuggestions.value = [];
+      if (token === pluginToken) {
+        pluginSuggestions.value = [];
+      }
     }
   }
 
@@ -166,7 +322,6 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     const silent = options.silent === true;
     if (!silent) loading.value = true;
     try {
-      // Preserve already-hydrated text bodies across list refresh
       const hydratedText = new Map<string, string>();
       for (const it of items.value) {
         if (it.kind === "text" && it.text != null) {
@@ -181,7 +336,6 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
         return cached != null ? { ...r, text: cached } : r;
       });
 
-      // Auto-select newest when a new item lands at the top (clipboard capture).
       const topId = records[0]?.id ?? "";
       if (topId && topId !== prevFirstId && (!selectedId.value || silent)) {
         selectedId.value = topId;
@@ -203,6 +357,7 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     imageSrc.value = "";
     const item = selectedItem.value;
     if (!item || item.kind !== "image") return;
+    // Cache image src by id lightly via... always resolve is cheap enough; could cache later
     try {
       const path = await api.resolveImagePath(item.id);
       imageSrc.value = convertFileSrc(path);
@@ -224,16 +379,16 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
   async function copyItem(item: HistoryItem) {
     selectedId.value = item.id;
     try {
+      // Prefer current panel draft when copying the selected text item
       let override: string | null = null;
-      if (item.kind === "text") {
-        if (item.id === selectedItem.value?.id && appliedBody.value != null) {
-          override = appliedBody.value;
-        }
+      if (item.kind === "text" && item.id === selectedId.value) {
+        override = editorText.value;
       }
-      // Backend loads full text from DB when override is null
       await api.copyHistory(item.id, override);
       setStatus(
-        override && override !== (item.text ?? "") ? "已复制解析结果" : "已复制到剪贴板",
+        override != null && override !== (item.text ?? "")
+          ? "已复制面板内容"
+          : "已复制到剪贴板",
         "ok",
       );
     } catch (error) {
@@ -245,6 +400,8 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     if (items.value.length === 0) return;
     try {
       await api.clearHistory();
+      builtinCache.clear();
+      pluginCache.clear();
       await loadHistory({ silent: true });
       setStatus("已清空历史", "ok");
     } catch (error) {
@@ -258,16 +415,28 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
   });
 
   watch(selectedId, () => {
+    // Discard local draft — history is never written by the editor
     resetApplied();
-    pluginSuggestions.value = [];
+    editorDirty.value = false;
+
+    const item = items.value.find((i) => i.id === selectedId.value) ?? null;
+    syncEditorFromItem(item);
+
+    if (item && !(item.kind === "text" && item.text == null)) {
+      updateBuiltinForItem(item);
+      if (!tryRestorePluginCache(item)) {
+        pluginSuggestions.value = [];
+      }
+    } else {
+      builtinSuggestions.value = [];
+      pluginSuggestions.value = [];
+    }
+
     void hydrateSelected();
   });
 
   watch(selectedItem, () => {
     void refreshImagePreview();
-    if (selectedItem.value?.kind === "image") {
-      void runPluginsForSelected();
-    }
   });
 
   function disposeHistory() {
@@ -276,8 +445,17 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     pluginToken += 1;
   }
 
-  /** Call after enabling/disabling plugins so current selection re-runs. */
-  function refreshPluginSuggestions() {
+  /**
+   * Call after plugin enable/disable/import/remove.
+   * @param enabledIds optional sorted list of enabled plugin ids (with optional @version)
+   */
+  function refreshPluginSuggestions(enabledIds?: string[]) {
+    if (enabledIds) {
+      pluginSig = [...enabledIds].sort().join("|");
+    } else {
+      pluginSig = null;
+    }
+    pluginCache.clear();
     void runPluginsForSelected();
   }
 
@@ -290,6 +468,10 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     selectedItem,
     imageSrc,
     panelContent,
+    editorText,
+    editorDirty,
+    hydrating,
+    isTextEditor,
     suggestions,
     appliedSuggestionId,
     isShowingOriginal,
@@ -302,6 +484,7 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     applySuggestion,
     applyAndCopySuggestion,
     showOriginal,
+    onEditorInput,
     disposeHistory,
     refreshPluginSuggestions,
   };

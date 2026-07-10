@@ -12,6 +12,20 @@ export function defaultToggleHotkey(platform: ShortcutPlatform = detectShortcutP
   return platform === "mac" ? "Option+Space" : "Alt+Space";
 }
 
+/** Default 3-key append-copy shortcut. */
+export function defaultAppendCopyHotkey(
+  platform: ShortcutPlatform = detectShortcutPlatform(),
+): string {
+  return platform === "mac" ? "Cmd+Shift+C" : "Ctrl+Shift+C";
+}
+
+/** Default 3-key: copy selection + open FunCV for parse. */
+export function defaultParseCopyHotkey(
+  platform: ShortcutPlatform = detectShortcutPlatform(),
+): string {
+  return platform === "mac" ? "Shift+Option+X" : "Shift+Alt+X";
+}
+
 function keyFromEvent(
   event: Pick<KeyboardEvent, "key"> & Partial<Pick<KeyboardEvent, "code">>,
 ) {
@@ -34,11 +48,15 @@ function keyFromEvent(
   return event.key.length === 1 ? event.key.toUpperCase() : event.key;
 }
 
-/** Display string e.g. Option+Space, Ctrl+Shift+V */
+/**
+ * Display string e.g. Option+Space, Ctrl+Shift+V.
+ * @param minParts minimum segments (default 2 for toggle; use 3 for append-copy).
+ */
 export function shortcutDisplayFromEvent(
   event: Pick<KeyboardEvent, "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "key"> &
     Partial<Pick<KeyboardEvent, "code">>,
   platform: ShortcutPlatform = detectShortcutPlatform(),
+  minParts = 2,
 ): string {
   const key = keyFromEvent(event);
   const lower = key.toLowerCase();
@@ -56,6 +74,6 @@ export function shortcutDisplayFromEvent(
     lower === " " || lower === "space" ? "Space" : key.length === 1 ? key.toUpperCase() : key;
   parts.push(displayKey);
 
-  if (parts.length < 2) return "";
+  if (parts.length < minParts) return "";
   return parts.join("+");
 }

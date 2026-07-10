@@ -1,3 +1,4 @@
+mod append_copy;
 mod commands;
 mod config;
 mod history;
@@ -180,6 +181,8 @@ pub fn run() {
         HistoryStore::open(&data_root, app_config.history.max_items).expect("open history store");
     let poll_ms = app_config.poll_interval_ms;
     let toggle_hotkey = app_config.toggle_hotkey.clone();
+    let append_copy_hotkey = app_config.append_copy_hotkey.clone();
+    let parse_copy_hotkey = app_config.parse_copy_hotkey.clone();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -192,6 +195,9 @@ pub fn run() {
         })
         .manage(Lifecycle::new())
         .setup(move |app| {
+            // Keep setup short so the webview can accept clicks/drag ASAP.
+            // Heavy work (hotkey, watcher, dock icon) is deferred below.
+
             let settings_i = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&settings_i, &quit_i])?;
@@ -202,7 +208,6 @@ pub fn run() {
                     .expect("default window icon")
             });
 
-            // Left-click shows window; right-click opens menu (设置 / 退出).
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon)
                 .menu(&menu)
@@ -229,7 +234,6 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        // Click tray → show main window immediately.
                         show_main(tray.app_handle());
                     }
                 });
@@ -243,10 +247,6 @@ pub fn run() {
             app.manage(TrayHandle(tray));
 
             if let Some(window) = app.get_webview_window("main") {
-                // Set icon asynchronously so setup returns quickly and UI can interact.
-                if let Ok(icon) = Image::from_bytes(APP_ICON_PNG) {
-                    let _ = window.set_icon(icon);
-                }
                 let handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
@@ -256,28 +256,46 @@ pub fn run() {
                 });
             }
 
-            // Defer Dock icon reapply — avoid contending main thread during first interaction.
-            #[cfg(target_os = "macos")]
-            {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(120));
-                    let _ = handle.run_on_main_thread(|| {
-                        reapply_app_icon();
-                    });
-                });
-            }
-
-            let state = app.state::<AppState>();
-            if let Err(err) =
-                commands::register_toggle_hotkey(app.handle(), &state, &toggle_hotkey)
-            {
-                eprintln!("[nfun-cv] register toggle hotkey failed: {err}");
-            }
-
-            // Watcher starts delayed + skips baseline clipboard (see watcher.rs).
+            // Clipboard watcher: thread starts immediately but idles ~900ms before
+            // touching NSPasteboard (see watcher.rs) so first drag/click stay smooth.
             let watcher = ClipboardWatcher::start(app.handle().clone(), poll_ms);
             app.manage(WatcherHandle(watcher));
+
+            // Defer hotkey + window icon + dock icon off the critical path.
+            let handle = app.handle().clone();
+            let hotkey = toggle_hotkey.clone();
+            let append_hk = append_copy_hotkey.clone();
+            let parse_hk = parse_copy_hotkey.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+
+                if let Some(window) = handle.get_webview_window("main") {
+                    if let Ok(icon) = Image::from_bytes(APP_ICON_PNG) {
+                        let _ = window.set_icon(icon);
+                    }
+                }
+
+                if let Some(state) = handle.try_state::<AppState>() {
+                    if let Err(err) = commands::register_app_hotkeys(
+                        &handle,
+                        &state,
+                        &hotkey,
+                        &append_hk,
+                        &parse_hk,
+                    ) {
+                        eprintln!("[nfun-cv] register hotkeys failed: {err}");
+                    }
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let h2 = handle.clone();
+                    let _ = h2.run_on_main_thread(|| {
+                        reapply_app_icon();
+                    });
+                }
+            });
 
             Ok(())
         })
@@ -293,6 +311,7 @@ pub fn run() {
             commands::data_root_path,
             commands::hide_main_window,
             commands::show_main_window,
+            commands::get_fun_stats,
             commands::list_plugins,
             commands::set_plugin_enabled,
             commands::import_plugin,
@@ -312,11 +331,15 @@ pub fn run() {
     app.run(|app_handle, event| {
         match event {
             RunEvent::Ready => {
+                // Defer dock work so first paint + drag stay responsive.
                 #[cfg(target_os = "macos")]
                 {
                     let handle = app_handle.clone();
-                    let _ = handle.run_on_main_thread(|| {
-                        reapply_app_icon();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        let _ = handle.run_on_main_thread(|| {
+                            reapply_app_icon();
+                        });
                     });
                 }
             }

@@ -5,6 +5,7 @@ import type {
   HistoryItem,
   PluginInfo,
   PluginOutput,
+  StatsSnapshot,
 } from "../core/types";
 
 export function listHistory(query: string) {
@@ -54,6 +55,10 @@ export function hideMainWindow() {
 
 export function showMainWindow() {
   return invoke<void>("show_main_window");
+}
+
+export function getFunStats() {
+  return invoke<StatsSnapshot>("get_fun_stats");
 }
 
 // ----- Plugins -----

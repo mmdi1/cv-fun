@@ -1,11 +1,15 @@
-use crate::config::{load_config, save_config, to_global_hotkey, AppConfig};
+use crate::append_copy::{run_append_copy, run_copy_selection};
+use crate::config::{
+    load_config, save_config, to_append_copy_hotkey, to_global_hotkey, to_parse_copy_hotkey,
+    AppConfig,
+};
 use crate::history::{HistoryItem, HistoryStore, ItemKind};
 use arboard::{Clipboard, ImageData};
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Mutex as StdMutex;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 pub struct AppState {
@@ -122,10 +126,38 @@ pub fn save_app_config(
     }
     // Validate hotkey before saving
     let _ = to_global_hotkey(&config.toggle_hotkey).map_err(map_err)?;
+    config.append_copy_hotkey = config.append_copy_hotkey.trim().to_string();
+    config.parse_copy_hotkey = config.parse_copy_hotkey.trim().to_string();
+
+    if !config.append_copy_hotkey.is_empty() {
+        let _ = to_append_copy_hotkey(&config.append_copy_hotkey).map_err(map_err)?;
+        if config.append_copy_hotkey.eq_ignore_ascii_case(config.toggle_hotkey.trim()) {
+            return Err("追加复制快捷键不能与唤起/隐藏快捷键相同".into());
+        }
+    }
+    if !config.parse_copy_hotkey.is_empty() {
+        let _ = to_parse_copy_hotkey(&config.parse_copy_hotkey).map_err(map_err)?;
+        if config.parse_copy_hotkey.eq_ignore_ascii_case(config.toggle_hotkey.trim()) {
+            return Err("复制并解析快捷键不能与唤起/隐藏快捷键相同".into());
+        }
+        if !config.append_copy_hotkey.is_empty()
+            && config
+                .parse_copy_hotkey
+                .eq_ignore_ascii_case(config.append_copy_hotkey.trim())
+        {
+            return Err("复制并解析快捷键不能与追加复制快捷键相同".into());
+        }
+    }
 
     save_config(&state.data_root, &config).map_err(map_err)?;
     state.store.lock().set_max_items(config.history.max_items);
-    register_toggle_hotkey(&app, &state, &config.toggle_hotkey)?;
+    register_app_hotkeys(
+        &app,
+        &state,
+        &config.toggle_hotkey,
+        &config.append_copy_hotkey,
+        &config.parse_copy_hotkey,
+    )?;
     Ok(config)
 }
 
@@ -147,36 +179,138 @@ pub fn toggle_main_window(app: &AppHandle) {
     }
 }
 
-pub fn register_toggle_hotkey(
+/// Register toggle + optional append-copy + parse-copy global shortcuts.
+pub fn register_app_hotkeys(
     app: &AppHandle,
     state: &AppState,
-    display: &str,
+    toggle_display: &str,
+    append_display: &str,
+    parse_display: &str,
 ) -> Result<(), String> {
     let _ = app.global_shortcut().unregister_all();
     if let Ok(mut registered) = state.registered_hotkeys.lock() {
         registered.clear();
     }
 
-    let hotkey = to_global_hotkey(display).map_err(map_err)?;
-    let shortcut: Shortcut = hotkey
-        .parse()
-        .map_err(|e| format!("无效快捷键 {display} ({hotkey}): {e}"))?;
-
-    let app_handle = app.clone();
-    app.global_shortcut()
-        .on_shortcut(shortcut, move |_app, _shortcut, event| {
-            if event.state != ShortcutState::Pressed {
-                return;
-            }
-            toggle_main_window(&app_handle);
-        })
-        .map_err(map_err)?;
-
-    if let Ok(mut registered) = state.registered_hotkeys.lock() {
-        registered.push(hotkey);
+    // Toggle main window
+    {
+        let hotkey = to_global_hotkey(toggle_display).map_err(map_err)?;
+        let shortcut: Shortcut = hotkey
+            .parse()
+            .map_err(|e| format!("无效快捷键 {toggle_display} ({hotkey}): {e}"))?;
+        let app_handle = app.clone();
+        app.global_shortcut()
+            .on_shortcut(shortcut, move |_app, _shortcut, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                toggle_main_window(&app_handle);
+            })
+            .map_err(map_err)?;
+        if let Ok(mut registered) = state.registered_hotkeys.lock() {
+            registered.push(hotkey);
+        }
     }
+
+    // Append copy (optional; empty = disabled)
+    let append = append_display.trim();
+    if !append.is_empty() {
+        let hotkey = to_append_copy_hotkey(append).map_err(map_err)?;
+        let shortcut: Shortcut = hotkey
+            .parse()
+            .map_err(|e| format!("无效追加复制快捷键 {append} ({hotkey}): {e}"))?;
+        let app_handle = app.clone();
+        app.global_shortcut()
+            .on_shortcut(shortcut, move |_app, _shortcut, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                let handle = app_handle.clone();
+                std::thread::Builder::new()
+                    .name("append-copy".into())
+                    .spawn(move || {
+                        let payload = match run_append_copy() {
+                            Ok(merged) => {
+                                let preview: String = merged.chars().take(48).collect();
+                                let message = if merged.chars().count() > 48 {
+                                    format!("已追加复制 · {preview}…")
+                                } else {
+                                    format!("已追加复制 · {preview}")
+                                };
+                                serde_json::json!({ "ok": true, "message": message })
+                            }
+                            Err(err) => {
+                                if err.contains("进行中") || err.contains("处理中") {
+                                    return;
+                                }
+                                serde_json::json!({ "ok": false, "message": err })
+                            }
+                        };
+                        let _ = handle.emit("append-copy-result", payload);
+                    })
+                    .ok();
+            })
+            .map_err(map_err)?;
+        if let Ok(mut registered) = state.registered_hotkeys.lock() {
+            registered.push(hotkey);
+        }
+    }
+
+    // Copy selection + show app for parse (optional)
+    let parse = parse_display.trim();
+    if !parse.is_empty() {
+        let hotkey = to_parse_copy_hotkey(parse).map_err(map_err)?;
+        let shortcut: Shortcut = hotkey
+            .parse()
+            .map_err(|e| format!("无效复制并解析快捷键 {parse} ({hotkey}): {e}"))?;
+        let app_handle = app.clone();
+        app.global_shortcut()
+            .on_shortcut(shortcut, move |_app, _shortcut, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                let handle = app_handle.clone();
+                std::thread::Builder::new()
+                    .name("parse-copy".into())
+                    .spawn(move || {
+                        let result = run_copy_selection();
+                        // Always raise the app so user can see parse (or the error).
+                        crate::show_main(&handle);
+                        match result {
+                            Ok(text) => {
+                                let preview: String = text.chars().take(48).collect();
+                                let message = if text.chars().count() > 48 {
+                                    format!("已复制并打开 · {preview}…")
+                                } else {
+                                    format!("已复制并打开 · {preview}")
+                                };
+                                let _ = handle.emit(
+                                    "parse-copy-result",
+                                    serde_json::json!({ "ok": true, "message": message }),
+                                );
+                            }
+                            Err(err) => {
+                                if err.contains("处理中") {
+                                    return;
+                                }
+                                let _ = handle.emit(
+                                    "parse-copy-result",
+                                    serde_json::json!({ "ok": false, "message": err }),
+                                );
+                            }
+                        }
+                    })
+                    .ok();
+            })
+            .map_err(map_err)?;
+        if let Ok(mut registered) = state.registered_hotkeys.lock() {
+            registered.push(hotkey);
+        }
+    }
+
     Ok(())
 }
+
 
 #[tauri::command]
 pub fn data_root_path(state: State<'_, AppState>) -> Result<String, String> {
@@ -193,6 +327,11 @@ pub fn hide_main_window(app: AppHandle) -> Result<(), String> {
 pub fn show_main_window(app: AppHandle) -> Result<(), String> {
     crate::show_main(&app);
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_fun_stats(state: State<'_, AppState>) -> Result<crate::history::StatsSnapshot, String> {
+    state.store.lock().fun_stats().map_err(map_err)
 }
 
 // -------------------- Plugins --------------------

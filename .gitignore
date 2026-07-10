@@ -126,3 +126,4 @@ temp/
 .tern-port
 .vscode-test/
 )
+scripts/*

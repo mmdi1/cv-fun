@@ -22,6 +22,16 @@ export type AppConfig = {
   pollIntervalMs: number;
   /** Display form e.g. Option+Space */
   toggleHotkey: string;
+  /**
+   * 3-key combo: append selection to existing text clipboard with double-space.
+   * Empty string disables. e.g. Cmd+Shift+C
+   */
+  appendCopyHotkey: string;
+  /**
+   * 3-key combo: copy selection then show FunCV for parse.
+   * Empty string disables. e.g. Shift+Option+X
+   */
+  parseCopyHotkey: string;
 };
 
 /**
@@ -80,4 +90,35 @@ export type EcdictStatus = {
   path: string;
   entries: number;
   sizeBytes: number;
+};
+
+export type TopRepeat = {
+  hash: string;
+  preview: string;
+  kind: string;
+  count: number;
+};
+
+export type DailyStat = {
+  day: string;
+  total: number;
+  duplicates: number;
+  text: number;
+  image: number;
+};
+
+export type StatsSnapshot = {
+  totalCopies: number;
+  totalDuplicates: number;
+  textCopies: number;
+  imageCopies: number;
+  todayCopies: number;
+  todayDuplicates: number;
+  historyItems: number;
+  duplicateRate: number;
+  peakHour: number | null;
+  peakHourCount: number;
+  streakDays: number;
+  topRepeats: TopRepeat[];
+  daily: DailyStat[];
 };

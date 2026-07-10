@@ -13,6 +13,14 @@ pub struct AppConfig {
     /// Display form e.g. "Option+Space" / "Ctrl+Shift+V"
     #[serde(default = "default_toggle_hotkey")]
     pub toggle_hotkey: String,
+    /// 3-key combo: append selection to existing text clipboard with double-space.
+    /// Empty string = disabled.
+    #[serde(default = "default_append_copy_hotkey")]
+    pub append_copy_hotkey: String,
+    /// 3-key combo: copy selection then show FunCV for parse.
+    /// Empty string = disabled. e.g. "Shift+Option+X"
+    #[serde(default = "default_parse_copy_hotkey")]
+    pub parse_copy_hotkey: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,12 +37,30 @@ fn default_toggle_hotkey() -> String {
     }
 }
 
+fn default_append_copy_hotkey() -> String {
+    if cfg!(target_os = "macos") {
+        "Cmd+Shift+C".into()
+    } else {
+        "Ctrl+Shift+C".into()
+    }
+}
+
+fn default_parse_copy_hotkey() -> String {
+    if cfg!(target_os = "macos") {
+        "Shift+Option+X".into()
+    } else {
+        "Shift+Alt+X".into()
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             history: HistoryConfig { max_items: 500 },
             poll_interval_ms: 400,
             toggle_hotkey: default_toggle_hotkey(),
+            append_copy_hotkey: default_append_copy_hotkey(),
+            parse_copy_hotkey: default_parse_copy_hotkey(),
         }
     }
 }
@@ -79,6 +105,8 @@ fn sanitize_config(config: &mut AppConfig) {
     if config.toggle_hotkey.trim().is_empty() {
         config.toggle_hotkey = default_toggle_hotkey();
     }
+    config.append_copy_hotkey = config.append_copy_hotkey.trim().to_string();
+    config.parse_copy_hotkey = config.parse_copy_hotkey.trim().to_string();
 }
 
 /// Convert UI display shortcut (Option+Space / Ctrl+Shift+V) into global-hotkey format.
@@ -120,9 +148,36 @@ pub fn to_global_hotkey(display: &str) -> Result<String, HistoryError> {
         }
     }
 
-    let key = key.ok_or_else(|| {
-        HistoryError::Message(format!("快捷键缺少主键: {display}"))
-    })?;
+    let key = key.ok_or_else(|| HistoryError::Message(format!("快捷键缺少主键: {display}")))?;
     mods.push(key.as_str());
     Ok(mods.join("+"))
+}
+
+/// 3-key combo (2 modifiers + key), e.g. Cmd+Shift+C / Shift+Option+X.
+pub fn to_three_key_hotkey(display: &str, label: &str) -> Result<String, HistoryError> {
+    let display = display.trim();
+    if display.is_empty() {
+        return Err(HistoryError::Message(format!("{label}快捷键为空")));
+    }
+    let parts: Vec<&str> = display
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.len() < 3 {
+        return Err(HistoryError::Message(format!(
+            "{label}需 3 键组合（两个修饰键 + 主键），例如 Shift+Option+X：{display}"
+        )));
+    }
+    to_global_hotkey(display)
+}
+
+/// Append-copy requires a 3-key combination.
+pub fn to_append_copy_hotkey(display: &str) -> Result<String, HistoryError> {
+    to_three_key_hotkey(display, "追加复制")
+}
+
+/// Parse-copy (copy selection + show app) requires a 3-key combination.
+pub fn to_parse_copy_hotkey(display: &str) -> Result<String, HistoryError> {
+    to_three_key_hotkey(display, "复制并解析")
 }

@@ -1,38 +1,7 @@
 import type { ParseSuggestion } from "../../core/types";
 import type { ContentContext, ContentExtension } from "../types";
 import { formatDateTime } from "../../utils/time";
-
-function parseUnixTimestamp(text: string): { date: Date; unit: "s" | "ms" } | null {
-  if (!/^-?\d{10}(\d{3})?$/.test(text)) return null;
-  const raw = Number(text);
-  const unit = text.replace(/^-/, "").length === 13 ? "ms" : "s";
-  const ms = unit === "ms" ? raw : raw * 1000;
-  const date = new Date(ms);
-  if (Number.isNaN(date.getTime())) return null;
-  if (date.getFullYear() < 2000 || date.getFullYear() > 2100) return null;
-  return { date, unit };
-}
-
-function parseHumanDateTime(text: string): Date | null {
-  const t = text.trim();
-  const m =
-    /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?$/.exec(t);
-  if (m) {
-    const y = Number(m[1]);
-    const mo = Number(m[2]) - 1;
-    const d = Number(m[3]);
-    const h = Number(m[4] ?? 0);
-    const mi = Number(m[5] ?? 0);
-    const s = Number(m[6] ?? 0);
-    const date = new Date(y, mo, d, h, mi, s);
-    if (!Number.isNaN(date.getTime())) return date;
-  }
-  if (/^\d{4}-\d{2}-\d{2}T/.test(t)) {
-    const date = new Date(t);
-    if (!Number.isNaN(date.getTime())) return date;
-  }
-  return null;
-}
+import { tryAbsoluteTimestampPanel } from "../../utils/timestampAbs";
 
 export const timestampExtension: ContentExtension = {
   id: "timestamp",
@@ -41,47 +10,60 @@ export const timestampExtension: ContentExtension = {
     if (ctx.kind !== "text") return [];
     const text = ctx.rawText.trim();
     if (!text) return [];
-    const out: ParseSuggestion[] = [];
 
-    const unix = parseUnixTimestamp(text);
-    if (unix) {
-      const human = formatDateTime(unix.date);
-      out.push({
-        id: "ts:human",
-        title: "时间戳 → 时间",
-        preview: human,
-        body: human,
-        hint: unix.unit === "ms" ? "毫秒" : "秒",
-        recommended: true,
-      });
-      const both = `${Math.floor(unix.date.getTime() / 1000)} (s)\n${unix.date.getTime()} (ms)`;
-      out.push({
-        id: "ts:both",
-        title: "秒 / 毫秒",
-        preview: both.replace(/\n/g, " · "),
-        body: both,
-      });
-      return out;
+    // Absolute match: full panel is shown in content area; keep light suggestions for bar.
+    const abs = tryAbsoluteTimestampPanel(text);
+    if (abs) {
+      const local = formatDateTime(abs.date);
+      const sec = String(Math.floor(abs.date.getTime() / 1000));
+      const ms = String(abs.date.getTime());
+      if (abs.kind === "unix") {
+        return [
+          {
+            id: "ts:human",
+            title: "时间戳 → 本地时间",
+            preview: local,
+            body: local,
+            hint: abs.unit === "ms" ? "毫秒" : "秒",
+            recommended: true,
+          },
+          {
+            id: "ts:sec",
+            title: "Unix 秒",
+            preview: sec,
+            body: sec,
+          },
+          {
+            id: "ts:ms",
+            title: "Unix 毫秒",
+            preview: ms,
+            body: ms,
+          },
+        ];
+      }
+      return [
+        {
+          id: "ts:to-s",
+          title: "→ 秒时间戳",
+          preview: sec,
+          body: sec,
+          recommended: true,
+        },
+        {
+          id: "ts:to-ms",
+          title: "→ 毫秒时间戳",
+          preview: ms,
+          body: ms,
+        },
+        {
+          id: "ts:local",
+          title: "本地时间",
+          preview: local,
+          body: local,
+        },
+      ];
     }
 
-    const human = parseHumanDateTime(text);
-    if (human) {
-      const s = String(Math.floor(human.getTime() / 1000));
-      const ms = String(human.getTime());
-      out.push({
-        id: "ts:to-s",
-        title: "→ 秒时间戳",
-        preview: s,
-        body: s,
-        recommended: true,
-      });
-      out.push({
-        id: "ts:to-ms",
-        title: "→ 毫秒时间戳",
-        preview: ms,
-        body: ms,
-      });
-    }
-    return out;
+    return [];
   },
 };

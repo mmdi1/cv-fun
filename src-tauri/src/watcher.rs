@@ -23,8 +23,9 @@ impl ClipboardWatcher {
         let interval = Duration::from_millis(interval_ms.max(150));
 
         thread::spawn(move || {
-            // Brief pause so first UI paint / history load can finish.
-            thread::sleep(Duration::from_millis(200));
+            // Wait for UI to become interactive before touching the pasteboard.
+            // Opening NSPasteboard / decoding a large image can freeze early frames.
+            thread::sleep(Duration::from_millis(900));
 
             let mut clipboard = match Clipboard::new() {
                 Ok(c) => c,
@@ -34,16 +35,22 @@ impl ClipboardWatcher {
                 }
             };
 
-            // First observed pasteboard generation is baseline — do not import it.
+            // Baseline only — never import whatever is already on the clipboard at launch.
+            // Prefer changeCount so we do NOT decode images during prime.
             let mut last_change: Option<i64> = pasteboard_change_count();
             let mut last_content_sig: Option<String> = None;
             let mut primed = last_change.is_some();
 
-            // If changeCount is unavailable, fall back to content signatures and
-            // skip the first successful content read as baseline.
+            // Fallback platforms without changeCount: only hash text (skip get_image on prime).
             if !primed {
-                if let Ok(Some(snap)) = read_snapshot(&mut clipboard) {
-                    last_content_sig = Some(snap.signature);
+                if let Ok(text) = clipboard.get_text() {
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        let mut hasher = Sha256::new();
+                        hasher.update(b"text:");
+                        hasher.update(t.as_bytes());
+                        last_content_sig = Some(format!("txt:{}", hex::encode(hasher.finalize())));
+                    }
                 }
                 primed = true;
             }
@@ -253,7 +260,7 @@ fn commit_snapshot(app: &AppHandle, snapshot: Snapshot) -> Result<(), String> {
         .try_state::<crate::commands::AppState>()
         .ok_or_else(|| "app state missing".to_string())?;
 
-    let item = {
+    let added = {
         let store = state.store.lock();
         if let Some(img) = snapshot.image {
             store
@@ -265,27 +272,31 @@ fn commit_snapshot(app: &AppHandle, snapshot: Snapshot) -> Result<(), String> {
             return Ok(());
         }
     };
+    let item = added.item;
 
     let kind = match item.kind {
         ItemKind::Text => "text",
         ItemKind::Image => "image",
     };
     eprintln!(
-        "[nfun-cv] clipboard captured id={} kind={} preview={}",
-        item.id, kind, item.preview
+        "[nfun-cv] clipboard captured id={} kind={} dup={} consec={} preview={}",
+        item.id, kind, added.is_duplicate, added.is_consecutive, item.preview
     );
+
+    let payload = serde_json::json!({
+        "id": item.id,
+        "kind": kind,
+        "duplicate": added.is_duplicate,
+        "consecutive": added.is_consecutive,
+    });
 
     // Prefer window emit so the webview definitely receives the event.
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.emit(
-            "clipboard-history-changed",
-            serde_json::json!({ "id": item.id, "kind": kind }),
-        );
+        let _ = window.emit("clipboard-history-changed", &payload);
+        let _ = window.emit("clipboard-stats-changed", &payload);
     } else {
-        let _ = app.emit(
-            "clipboard-history-changed",
-            serde_json::json!({ "id": item.id, "kind": kind }),
-        );
+        let _ = app.emit("clipboard-history-changed", &payload);
+        let _ = app.emit("clipboard-stats-changed", &payload);
     }
     Ok(())
 }
