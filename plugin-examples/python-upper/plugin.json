@@ -1,0 +1,10 @@
+{
+  "id": "python-upper",
+  "name": "Python 大写示例",
+  "version": "1.0.0",
+  "runtime": "python",
+  "entry": "main.py",
+  "description": "演示 python 插件：将文本转为大写。",
+  "types": ["text"],
+  "enabled": true
+}

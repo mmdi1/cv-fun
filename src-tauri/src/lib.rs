@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod history;
+mod plugins;
 mod watcher;
 
 use commands::AppState;
@@ -292,6 +293,18 @@ pub fn run() {
             commands::data_root_path,
             commands::hide_main_window,
             commands::show_main_window,
+            commands::list_plugins,
+            commands::set_plugin_enabled,
+            commands::import_plugin,
+            commands::remove_plugin,
+            commands::run_plugin,
+            commands::run_enabled_plugins,
+            commands::ecdict_status,
+            commands::install_ecdict,
+            commands::plugin_protocol_help,
+            commands::list_plugin_samples,
+            commands::export_plugin_sample,
+            commands::export_all_plugin_samples,
         ])
         .build(tauri::generate_context!())
         .expect("error while building FunCV");

@@ -1,0 +1,10 @@
+{
+  "id": "shell-wc",
+  "name": "Shell 字数统计",
+  "version": "1.0.0",
+  "runtime": "shell",
+  "entry": "main.sh",
+  "description": "演示 shell 插件：统计字符数。",
+  "types": ["text"],
+  "enabled": true
+}

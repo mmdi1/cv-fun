@@ -3,6 +3,7 @@ import { onMounted, onUnmounted } from "vue";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import * as api from "./api";
 import { useHistory } from "./composables/useHistory";
+import { usePlugins } from "./composables/usePlugins";
 import { useSettings } from "./composables/useSettings";
 import { useStatus } from "./composables/useStatus";
 import { formatHistoryTime } from "./utils/time";
@@ -31,6 +32,7 @@ const {
   applyAndCopySuggestion,
   showOriginal,
   disposeHistory,
+  refreshPluginSuggestions,
 } = useHistory(setStatus);
 
 const {
@@ -43,6 +45,32 @@ const {
   saveConfig,
   defaultToggleHotkey,
 } = useSettings(setStatus);
+
+const {
+  pluginsOpen,
+  pluginsTab,
+  plugins,
+  pluginsLoading,
+  ecdict,
+  ecdictBusy,
+  ecdictProgress,
+  protocolHelp,
+  samples,
+  samplesLoading,
+  openPlugins,
+  switchTab,
+  togglePlugin,
+  importPluginDir,
+  removeUserPlugin,
+  downloadEcdict,
+  exportSample,
+  exportAllSamples,
+} = usePlugins(setStatus);
+
+async function onTogglePlugin(p: (typeof plugins.value)[0]) {
+  await togglePlugin(p);
+  refreshPluginSuggestions();
+}
 
 function onGlobalKeydown(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "w") {
@@ -64,6 +92,12 @@ onMounted(() => {
   });
   void listen("open-settings", () => {
     settingsOpen.value = true;
+  }).then((u) => {
+    unlisteners.push(u);
+  });
+  void listen<{ message?: string; phase?: string }>("ecdict-progress", (ev) => {
+    const msg = ev.payload?.message;
+    if (msg) setStatus(msg, "ok");
   }).then((u) => {
     unlisteners.push(u);
   });
@@ -92,6 +126,7 @@ onUnmounted(() => {
       </div>
       <nav class="nav">
         <button type="button" class="link" :disabled="loading" @click="loadHistory()">刷新</button>
+        <button type="button" class="link" @click="openPlugins">插件</button>
         <button type="button" class="link" :disabled="!items.length" @click="clearAll">清空</button>
         <button type="button" class="link" @click="settingsOpen = true">设置</button>
       </nav>
@@ -223,6 +258,139 @@ onUnmounted(() => {
           <button type="button" class="link" @click="settingsOpen = false">取消</button>
           <button type="button" class="primary" @click="saveConfig">保存</button>
         </div>
+      </aside>
+    </div>
+
+    <!-- Plugin drawer -->
+    <div v-if="pluginsOpen" class="scrim" @click.self="pluginsOpen = false">
+      <aside class="drawer drawer-wide" @click.stop>
+        <header>
+          <h2>插件扩展</h2>
+          <button type="button" class="link icon" @click="pluginsOpen = false">×</button>
+        </header>
+
+        <div class="tabs" role="tablist">
+          <button
+            type="button"
+            class="tab"
+            :class="{ on: pluginsTab === 'list' }"
+            role="tab"
+            @click="switchTab('list')"
+          >
+            列表
+          </button>
+          <button
+            type="button"
+            class="tab"
+            :class="{ on: pluginsTab === 'custom' }"
+            role="tab"
+            @click="switchTab('custom')"
+          >
+            自定义
+          </button>
+        </div>
+
+        <!-- Tab: 列表 — installed plugins -->
+        <template v-if="pluginsTab === 'list'">
+          <div class="plugin-toolbar">
+            <button type="button" class="primary" @click="importPluginDir">上传插件</button>
+          </div>
+
+          <div class="ecdict-box">
+            <div class="ecdict-head">
+              <strong>ECDICT 本地词典</strong>
+              <span v-if="ecdict?.ready" class="chip soft">已就绪</span>
+              <span v-else class="chip soft">未安装</span>
+            </div>
+            <p class="tip">
+              内置「英汉互译」依赖
+              <a class="ext" href="https://github.com/skywind3000/ECDICT" target="_blank" rel="noreferrer"
+                >ECDICT</a
+              >
+              · 首次下载需几分钟
+            </p>
+            <p v-if="ecdict?.ready" class="tip">
+              {{ ecdict.entries.toLocaleString() }} 词条 ·
+              {{ Math.round((ecdict.sizeBytes || 0) / 1024 / 1024) }} MB
+            </p>
+            <p v-if="ecdictProgress" class="tip">{{ ecdictProgress }}</p>
+            <button type="button" class="link" :disabled="ecdictBusy" @click="downloadEcdict">
+              {{ ecdictBusy ? "下载 / 导入中…" : ecdict?.ready ? "重新下载词典" : "下载 ECDICT" }}
+            </button>
+          </div>
+
+          <div class="plugin-list-label">已安装插件</div>
+          <div v-if="pluginsLoading" class="tip">加载中…</div>
+          <ul v-else class="plugin-list">
+            <li v-for="p in plugins" :key="p.id" class="plugin-card">
+              <div class="plugin-main">
+                <div class="plugin-name">
+                  {{ p.name }}
+                  <span class="runtime">{{ p.runtime }}</span>
+                  <span v-if="p.builtin" class="runtime">内置</span>
+                  <span class="runtime" :class="{ off: !p.enabled }">{{ p.enabled ? "开" : "关" }}</span>
+                </div>
+                <p class="plugin-desc">{{ p.description || "—" }}</p>
+                <p class="plugin-meta">
+                  types: {{ (p.types || []).join(", ") || "text" }} · v{{ p.version }}
+                </p>
+              </div>
+              <div class="plugin-actions">
+                <button
+                  type="button"
+                  class="switch"
+                  :class="{ on: p.enabled }"
+                  :aria-pressed="p.enabled"
+                  :title="p.enabled ? '关闭插件' : '启用插件'"
+                  @click="onTogglePlugin(p)"
+                >
+                  <span class="switch-knob" />
+                </button>
+                <button
+                  v-if="!p.builtin"
+                  type="button"
+                  class="link danger"
+                  @click="removeUserPlugin(p)"
+                >
+                  删除
+                </button>
+              </div>
+            </li>
+          </ul>
+          <p v-if="!pluginsLoading && !plugins.length" class="tip">暂无插件</p>
+        </template>
+
+        <!-- Tab: 自定义 — protocol + sample downloads -->
+        <template v-else>
+          <div class="plugin-list-label">接口规范</div>
+          <div class="protocol-box">
+            <pre class="protocol">{{ protocolHelp || "加载中…" }}</pre>
+          </div>
+
+          <div class="plugin-list-label">示例文件</div>
+          <div class="plugin-toolbar">
+            <button type="button" class="primary" :disabled="samplesLoading" @click="exportAllSamples">
+              下载全部示例
+            </button>
+          </div>
+          <p class="tip">选择保存目录后，会生成对应文件夹（含 plugin.json 与入口脚本）。</p>
+          <div v-if="samplesLoading" class="tip">加载示例列表…</div>
+          <ul v-else class="plugin-list">
+            <li v-for="s in samples" :key="s.id" class="plugin-card">
+              <div class="plugin-main">
+                <div class="plugin-name">
+                  {{ s.name }}
+                  <span class="runtime">{{ s.runtime }}</span>
+                </div>
+                <p class="plugin-desc">{{ s.description }}</p>
+                <p class="plugin-meta">文件: {{ (s.files || []).join(", ") }}</p>
+              </div>
+              <div class="plugin-actions">
+                <button type="button" class="link" @click="exportSample(s.id, s.name)">下载</button>
+              </div>
+            </li>
+          </ul>
+        </template>
       </aside>
     </div>
   </main>
@@ -783,6 +951,21 @@ time {
   gap: 12px;
   background: #0f1419;
   border-left: 1px solid var(--line);
+  min-height: 0;
+  overflow: auto;
+  /* Keep scroll; hide scrollbar chrome */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.drawer::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.drawer-wide {
+  width: min(380px, 94vw);
 }
 
 .drawer header {
@@ -835,5 +1018,213 @@ time {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.tab {
+  min-height: 30px;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: var(--muted);
+}
+
+.tab:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tab.on {
+  color: #052018;
+  background: var(--accent);
+}
+
+.plugin-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.switch.on {
+  background: var(--accent);
+  border-color: rgba(62, 207, 173, 0.55);
+}
+
+.switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #e8edf2;
+  transition: transform 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.switch.on .switch-knob {
+  transform: translateX(18px);
+  background: #042019;
+}
+
+.runtime.off {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ecdict-box {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.ecdict-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ecdict-head strong {
+  font-size: 0.82rem;
+}
+
+.plugin-list-label {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.plugin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.plugin-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 10px;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.plugin-main {
+  min-width: 0;
+}
+
+.plugin-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.84rem;
+  font-weight: 680;
+}
+
+.runtime {
+  font-size: 0.6rem;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  text-transform: lowercase;
+}
+
+.plugin-desc {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.plugin-meta {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.66rem;
+  opacity: 0.85;
+}
+
+.plugin-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.plugin-actions .danger {
+  color: #f0a0a0;
+}
+
+.protocol-box {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: #0b1014;
+}
+
+.protocol {
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.68rem;
+  line-height: 1.45;
+  color: #c5d0d8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.protocol::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.tip code {
+  font-size: 0.7rem;
+  color: #d5f5e9;
+}
+
+.tip a.ext {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.tip a.ext:hover {
+  text-decoration: underline;
 }
 </style>

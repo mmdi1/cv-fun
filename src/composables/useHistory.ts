@@ -16,16 +16,22 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
 
   const appliedSuggestionId = ref<string | null>(null);
   const appliedBody = ref<string | null>(null);
+  /** Results from universal plugins (Rust / node / python / …) */
+  const pluginSuggestions = ref<ParseSuggestion[]>([]);
 
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let hydrateToken = 0;
+  let pluginToken = 0;
 
   const selectedItem = computed(
     () => items.value.find((i) => i.id === selectedId.value) ?? items.value[0] ?? null,
   );
 
   const resolved = computed(() => resolveContent(selectedItem.value));
-  const suggestions = computed(() => resolved.value.suggestions);
+  const suggestions = computed(() => {
+    // Builtin TS analyzers first, then plugin results
+    return [...resolved.value.suggestions, ...pluginSuggestions.value];
+  });
   const itemCountLabel = computed(() => `${items.value.length}`);
 
   const panelContent = computed((): PanelContent => {
@@ -67,7 +73,7 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
   async function applyAndCopySuggestion(s: ParseSuggestion) {
     applySuggestion(s);
     const item = selectedItem.value;
-    if (!item || item.kind !== "text") {
+    if (!item) {
       setStatus("无法复制", "err");
       return;
     }
@@ -98,7 +104,10 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     const item = items.value.find((i) => i.id === id);
     if (!item || item.kind !== "text") return;
     // Already has body
-    if (item.text != null) return;
+    if (item.text != null) {
+      void runPluginsForSelected();
+      return;
+    }
 
     const token = ++hydrateToken;
     hydrating.value = true;
@@ -106,12 +115,50 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
       const full = await api.getHistoryItem(id);
       if (token !== hydrateToken || selectedId.value !== id) return;
       mergeItem(full);
+      void runPluginsForSelected();
     } catch (error) {
       if (token === hydrateToken) {
         setStatus(error instanceof Error ? error.message : String(error), "err");
       }
     } finally {
       if (token === hydrateToken) hydrating.value = false;
+    }
+  }
+
+  async function runPluginsForSelected() {
+    const item = selectedItem.value;
+    if (!item) {
+      pluginSuggestions.value = [];
+      return;
+    }
+    const token = ++pluginToken;
+    const type = item.kind === "image" ? "img" : "text";
+    let content = "";
+    if (item.kind === "text") {
+      content = item.text ?? "";
+      if (!content) {
+        pluginSuggestions.value = [];
+        return;
+      }
+    } else {
+      // img: pass image path if available; plugins may ignore
+      content = item.imagePath ?? item.id;
+    }
+    try {
+      const outs = (await api.runEnabledPlugins(content, type)) || [];
+      if (token !== pluginToken) return;
+      pluginSuggestions.value = outs
+        .filter((o) => o.ok && o.body)
+        .map((o) => ({
+          id: `plugin:${o.pluginId}`,
+          title: o.title || o.pluginId,
+          preview: o.preview || o.body.replace(/\s+/g, " ").slice(0, 72),
+          body: o.body,
+          hint: o.hint || "插件",
+          recommended: o.pluginId === "translate-en-zh",
+        }));
+    } catch {
+      if (token === pluginToken) pluginSuggestions.value = [];
     }
   }
 
@@ -212,16 +259,26 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
 
   watch(selectedId, () => {
     resetApplied();
+    pluginSuggestions.value = [];
     void hydrateSelected();
   });
 
   watch(selectedItem, () => {
     void refreshImagePreview();
+    if (selectedItem.value?.kind === "image") {
+      void runPluginsForSelected();
+    }
   });
 
   function disposeHistory() {
     clearTimeout(searchTimer);
     hydrateToken += 1;
+    pluginToken += 1;
+  }
+
+  /** Call after enabling/disabling plugins so current selection re-runs. */
+  function refreshPluginSuggestions() {
+    void runPluginsForSelected();
   }
 
   return {
@@ -246,5 +303,6 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     applyAndCopySuggestion,
     showOriginal,
     disposeHistory,
+    refreshPluginSuggestions,
   };
 }

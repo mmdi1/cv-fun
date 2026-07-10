@@ -1,0 +1,10 @@
+{
+  "id": "go-echo",
+  "name": "Go 回显示例",
+  "version": "1.0.0",
+  "runtime": "go",
+  "entry": "main.go",
+  "description": "演示 go 插件：接收 content/type，原样返回。",
+  "types": ["text", "img"],
+  "enabled": true
+}

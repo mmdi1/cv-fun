@@ -25,11 +25,11 @@ export type AppConfig = {
 };
 
 /**
- * A recommended parse/transform shown as a compact row under the main panel.
+ * A recommended parse/transform shown under the main panel.
  * Click → apply `body` into the large content viewport.
  */
 export type ParseSuggestion = {
-  /** Stable id within an item, e.g. "json:pretty" */
+  /** Stable id within an item, e.g. "json:pretty" or "plugin:translate-en-zh" */
   id: string;
   /** Short label, e.g. "格式化 JSON" */
   title: string;
@@ -49,3 +49,35 @@ export type PanelContent =
   | { mode: "json"; body: string }
   | { mode: "image" }
   | { mode: "empty" };
+
+/** Universal plugin content type */
+export type PluginContentType = "text" | "img" | string;
+
+export type PluginInfo = {
+  id: string;
+  name: string;
+  version: string;
+  runtime: string;
+  description: string;
+  types: string[];
+  enabled: boolean;
+  builtin: boolean;
+  path?: string | null;
+};
+
+export type PluginOutput = {
+  ok: boolean;
+  title: string;
+  body: string;
+  preview: string;
+  hint: string;
+  error: string;
+  pluginId: string;
+};
+
+export type EcdictStatus = {
+  ready: boolean;
+  path: string;
+  entries: number;
+  sizeBytes: number;
+};

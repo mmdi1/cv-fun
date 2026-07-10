@@ -1,0 +1,10 @@
+{
+  "id": "node-echo",
+  "name": "Node 回显示例",
+  "version": "1.0.0",
+  "runtime": "node",
+  "entry": "main.js",
+  "description": "演示 node 插件：接收 content/type，原样返回。",
+  "types": ["text", "img"],
+  "enabled": true
+}

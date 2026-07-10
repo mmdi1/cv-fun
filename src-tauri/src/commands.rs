@@ -53,9 +53,16 @@ pub fn copy_history(
     let item = store.get(&id).map_err(map_err)?;
     let mut clipboard = Clipboard::new().map_err(map_err)?;
 
+    // Plugin / parse result always wins when override is provided (even for image items).
+    if let Some(text) = text_override {
+        clipboard.set_text(text).map_err(map_err)?;
+        store.mark_used(&id).map_err(map_err)?;
+        return Ok(());
+    }
+
     match item.kind {
         ItemKind::Text => {
-            let text = text_override.unwrap_or_else(|| item.text.unwrap_or_default());
+            let text = item.text.unwrap_or_default();
             clipboard.set_text(text).map_err(map_err)?;
         }
         ItemKind::Image => {
@@ -186,6 +193,163 @@ pub fn hide_main_window(app: AppHandle) -> Result<(), String> {
 pub fn show_main_window(app: AppHandle) -> Result<(), String> {
     crate::show_main(&app);
     Ok(())
+}
+
+// -------------------- Plugins --------------------
+
+#[tauri::command]
+pub fn list_plugins(state: State<'_, AppState>) -> Result<Vec<crate::plugins::PluginInfo>, String> {
+    crate::plugins::list_plugins(&state.data_root)
+}
+
+#[tauri::command]
+pub fn set_plugin_enabled(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    crate::plugins::set_plugin_enabled(&state.data_root, &id, enabled)
+}
+
+#[tauri::command]
+pub fn import_plugin(state: State<'_, AppState>, path: String) -> Result<crate::plugins::PluginInfo, String> {
+    crate::plugins::import_plugin_dir(&state.data_root, std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub fn remove_plugin(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    crate::plugins::remove_plugin(&state.data_root, &id)
+}
+
+#[tauri::command]
+pub fn run_plugin(
+    state: State<'_, AppState>,
+    id: String,
+    content: String,
+    r#type: String,
+) -> Result<crate::plugins::PluginOutput, String> {
+    let input = crate::plugins::PluginInput {
+        content,
+        r#type,
+    };
+    crate::plugins::run_plugin(&state.data_root, &id, &input)
+}
+
+#[tauri::command]
+pub fn run_enabled_plugins(
+    state: State<'_, AppState>,
+    content: String,
+    r#type: String,
+) -> Result<Vec<crate::plugins::PluginOutput>, String> {
+    let input = crate::plugins::PluginInput {
+        content,
+        r#type,
+    };
+    crate::plugins::run_all_enabled(&state.data_root, &input)
+}
+
+#[tauri::command]
+pub fn ecdict_status(state: State<'_, AppState>) -> Result<crate::plugins::EcdictStatus, String> {
+    Ok(crate::plugins::ecdict_ready(&state.data_root))
+}
+
+/// Download + import ECDICT (may take several minutes). Progress via `ecdict-progress` event.
+#[tauri::command]
+pub async fn install_ecdict(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::plugins::EcdictStatus, String> {
+    let root = state.data_root.clone();
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::plugins::install_ecdict(&app2, &root))
+        .await
+        .map_err(|e| format!("词典安装任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub fn plugin_protocol_help() -> String {
+    r#"# FunCV 插件协议
+
+## 1. 通用入参（仅 2 个字段）
+
+通过 stdin 传入 JSON：
+
+{
+  "content": "剪贴板文本，或图片相关路径",
+  "type": "text"
+}
+
+type 取值：
+- "text"  文本剪贴板
+- "img"   图片剪贴板（可扩展更多类型）
+
+## 2. 通用出参
+
+通过 stdout 输出 JSON（建议最后一行是完整 JSON）：
+
+成功：
+{
+  "ok": true,
+  "title": "显示标题（推荐解析卡片）",
+  "body": "完整结果（点击后写入主面板）",
+  "preview": "一行预览",
+  "hint": "可选副标题"
+}
+
+失败：
+{ "ok": false, "error": "原因说明" }
+
+## 3. plugin.json 清单
+
+{
+  "id": "my-plugin",
+  "name": "我的插件",
+  "version": "1.0.0",
+  "runtime": "node",
+  "entry": "main.js",
+  "description": "说明文字",
+  "types": ["text", "img"],
+  "enabled": true
+}
+
+runtime 可选：node | python | go | shell
+
+## 4. 运行时如何启动
+
+- node   →  node <entry>
+- python →  python3 <entry>
+- go     →  go run <entry.go>  或直接执行二进制
+- shell  →  sh <entry>
+
+工作目录 = 插件目录；环境变量：
+- NFUN_PLUGIN_ID
+- NFUN_PLUGIN_DIR
+
+## 5. 开发流程
+
+1. 在「自定义」页下载示例
+2. 修改脚本，保证 stdin/stdout 协议
+3. 在「列表」页点击「上传插件」选择目录导入
+4. 启用后，选中历史记录时自动参与推荐解析
+"#
+    .into()
+}
+
+#[tauri::command]
+pub fn list_plugin_samples() -> Vec<crate::plugins::SamplePack> {
+    crate::plugins::list_sample_packs()
+}
+
+/// Export one sample pack into a parent directory (creates subfolder by sample id).
+#[tauri::command]
+pub fn export_plugin_sample(id: String, dest_dir: String) -> Result<String, String> {
+    crate::plugins::export_sample_pack(&id, std::path::Path::new(&dest_dir))
+}
+
+/// Export all sample packs into dest_dir.
+#[tauri::command]
+pub fn export_all_plugin_samples(dest_dir: String) -> Result<Vec<String>, String> {
+    crate::plugins::export_all_samples(std::path::Path::new(&dest_dir))
 }
 
 
