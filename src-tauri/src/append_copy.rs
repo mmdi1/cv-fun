@@ -54,7 +54,7 @@ fn clipboard_text(cb: &mut Clipboard) -> Option<String> {
     }
 }
 
-/// Wait until common modifiers are up so synthetic Cmd+C does not re-fire Cmd+Shift+C etc.
+/// Wait until common modifiers are up so synthetic Cmd/Ctrl chords do not re-fire hotkeys.
 fn wait_modifiers_released(max_ms: u64) {
     #[cfg(target_os = "macos")]
     {
@@ -75,9 +75,23 @@ fn wait_modifiers_released(max_ms: u64) {
         thread::sleep(Duration::from_millis(40));
         return;
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        // Best-effort delay for Windows/Linux
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_millis(max_ms) {
+            if !windows_any_modifier_down() {
+                thread::sleep(Duration::from_millis(30));
+                if !windows_any_modifier_down() {
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(16));
+        }
+        thread::sleep(Duration::from_millis(40));
+        return;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
         thread::sleep(Duration::from_millis(max_ms.min(180)));
     }
 }
@@ -99,35 +113,144 @@ fn macos_any_modifier_down() -> bool {
     (flags & (CMD | SHIFT | OPTION | CONTROL)) != 0
 }
 
-/// Simulate system Copy via CGEvent on macOS (main-thread preferred), enigo elsewhere.
+#[cfg(target_os = "windows")]
+fn windows_any_modifier_down() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(v_key: i32) -> i16;
+    }
+    // VK_SHIFT=0x10, VK_CONTROL=0x11, VK_MENU(Alt)=0x12, VK_LWIN=0x5B, VK_RWIN=0x5C
+    const KEYS: [i32; 5] = [0x10, 0x11, 0x12, 0x5B, 0x5C];
+    unsafe {
+        KEYS.iter()
+            .any(|&k| (GetAsyncKeyState(k) as u16 & 0x8000) != 0)
+    }
+}
+
+/// Simulate system Copy via CGEvent on macOS (main-thread preferred), enigo/SendInput elsewhere.
 fn simulate_system_copy() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        return macos_post_cmd_c();
+        return macos_post_cmd_key(0x08); // kVK_ANSI_C
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-        let mut enigo =
-            Enigo::new(&Settings::default()).map_err(|e| format!("键盘模拟初始化失败: {e}"))?;
-        enigo
-            .key(Key::Control, Direction::Press)
-            .map_err(|e| format!("按键失败: {e}"))?;
-        thread::sleep(Duration::from_millis(12));
-        enigo
-            .key(Key::Unicode('c'), Direction::Click)
-            .map_err(|e| format!("按键失败: {e}"))?;
-        thread::sleep(Duration::from_millis(12));
-        enigo
-            .key(Key::Control, Direction::Release)
-            .map_err(|e| format!("按键失败: {e}"))?;
-        Ok(())
+        return windows_ctrl_key('c');
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        simulate_mod_key_click('c')
+    }
+}
+
+/// Simulate system Paste (Cmd+V / Ctrl+V) into the **currently focused** app.
+/// Caller must restore the target app's focus before invoking this.
+pub fn simulate_system_paste() -> Result<(), String> {
+    // Wait for user modifiers (e.g. still holding ⌘/Ctrl after digit shortcut) to settle.
+    wait_modifiers_released(450);
+    thread::sleep(Duration::from_millis(30));
+    #[cfg(target_os = "macos")]
+    {
+        // Full Command-down → V → Command-up sequence is more reliable than
+        // flagging only the V event when injecting into another app.
+        if macos_post_cmd_chord(0x09).is_ok() {
+            return Ok(());
+        }
+        // Fallback: enigo Meta+V
+        return macos_enigo_paste();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Prefer SendInput chord; fall back to enigo.
+        if windows_ctrl_key('v').is_ok() {
+            return Ok(());
+        }
+        return simulate_mod_key_click('v');
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        simulate_mod_key_click('v')
     }
 }
 
 #[cfg(target_os = "macos")]
-fn macos_post_cmd_c() -> Result<(), String> {
-    // Use CoreGraphics keyboard events directly — more predictable than enigo on hotkey paths.
+fn macos_enigo_paste() -> Result<(), String> {
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    let mut enigo =
+        Enigo::new(&Settings::default()).map_err(|e| format!("键盘模拟初始化失败: {e}"))?;
+    enigo
+        .key(Key::Meta, Direction::Press)
+        .map_err(|e| format!("按键失败: {e}"))?;
+    thread::sleep(Duration::from_millis(16));
+    enigo
+        .key(Key::Unicode('v'), Direction::Click)
+        .map_err(|e| format!("按键失败: {e}"))?;
+    thread::sleep(Duration::from_millis(16));
+    enigo
+        .key(Key::Meta, Direction::Release)
+        .map_err(|e| format!("按键失败: {e}"))?;
+    Ok(())
+}
+
+/// Windows: Ctrl + key via keybd_event (Ctrl down → key → Ctrl up).
+#[cfg(target_os = "windows")]
+fn windows_ctrl_key(ch: char) -> Result<(), String> {
+    #[link(name = "user32")]
+    extern "system" {
+        fn keybd_event(b_vk: u8, b_scan: u8, dw_flags: u32, dw_extra_info: usize);
+    }
+
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    const VK_CONTROL: u8 = 0x11;
+    let vk = match ch.to_ascii_lowercase() {
+        'c' => 0x43u8, // VK_C
+        'v' => 0x56u8, // VK_V
+        other => {
+            return Err(format!("不支持的按键: {other}"));
+        }
+    };
+
+    unsafe {
+        keybd_event(VK_CONTROL, 0, 0, 0);
+        thread::sleep(Duration::from_millis(12));
+        keybd_event(vk, 0, 0, 0);
+        thread::sleep(Duration::from_millis(12));
+        keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
+        thread::sleep(Duration::from_millis(12));
+        keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn simulate_mod_key_click(ch: char) -> Result<(), String> {
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    let mut enigo =
+        Enigo::new(&Settings::default()).map_err(|e| format!("键盘模拟初始化失败: {e}"))?;
+    enigo
+        .key(Key::Control, Direction::Press)
+        .map_err(|e| format!("按键失败: {e}"))?;
+    thread::sleep(Duration::from_millis(12));
+    enigo
+        .key(Key::Unicode(ch), Direction::Click)
+        .map_err(|e| format!("按键失败: {e}"))?;
+    thread::sleep(Duration::from_millis(12));
+    enigo
+        .key(Key::Control, Direction::Release)
+        .map_err(|e| format!("按键失败: {e}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_post_cmd_key(virtual_key: u16) -> Result<(), String> {
+    // Used by copy path: V/C with Command flag only.
+    macos_post_cmd_chord(virtual_key)
+}
+
+/// Post Command + `virtual_key` as a full chord:
+/// ⌘ down → key down → key up → ⌘ up (with Command flag on key events).
+#[cfg(target_os = "macos")]
+fn macos_post_cmd_chord(virtual_key: u16) -> Result<(), String> {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGEventSourceCreate(state_id: i32) -> *mut std::ffi::c_void;
@@ -142,13 +265,13 @@ fn macos_post_cmd_c() -> Result<(), String> {
     }
 
     // kCGEventSourceStateHIDSystemState = 1
-    // kVK_ANSI_C = 0x08
     // kCGEventFlagMaskCommand = 0x100000
     // kCGHIDEventTap = 0
+    // kVK_Command = 0x37
     const HID_SYSTEM: i32 = 1;
-    const KEY_C: u16 = 0x08;
     const FLAG_CMD: u64 = 0x100000;
     const HID_TAP: u32 = 0;
+    const KEY_CMD: u16 = 0x37;
 
     unsafe {
         let source = CGEventSourceCreate(HID_SYSTEM);
@@ -156,20 +279,44 @@ fn macos_post_cmd_c() -> Result<(), String> {
             return Err("无法创建键盘事件源".into());
         }
 
-        let down = CGEventCreateKeyboardEvent(source, KEY_C, true);
-        let up = CGEventCreateKeyboardEvent(source, KEY_C, false);
-        if down.is_null() || up.is_null() {
+        let cmd_down = CGEventCreateKeyboardEvent(source, KEY_CMD, true);
+        let key_down = CGEventCreateKeyboardEvent(source, virtual_key, true);
+        let key_up = CGEventCreateKeyboardEvent(source, virtual_key, false);
+        let cmd_up = CGEventCreateKeyboardEvent(source, KEY_CMD, false);
+        if cmd_down.is_null() || key_down.is_null() || key_up.is_null() || cmd_up.is_null() {
+            if !cmd_down.is_null() {
+                CFRelease(cmd_down);
+            }
+            if !key_down.is_null() {
+                CFRelease(key_down);
+            }
+            if !key_up.is_null() {
+                CFRelease(key_up);
+            }
+            if !cmd_up.is_null() {
+                CFRelease(cmd_up);
+            }
             CFRelease(source);
-            return Err("无法创建 Cmd+C 事件".into());
+            return Err("无法创建 Cmd 按键事件".into());
         }
-        CGEventSetFlags(down, FLAG_CMD);
-        CGEventSetFlags(up, FLAG_CMD);
-        CGEventPost(HID_TAP, down);
-        thread::sleep(Duration::from_millis(8));
-        CGEventPost(HID_TAP, up);
 
-        CFRelease(down);
-        CFRelease(up);
+        CGEventSetFlags(cmd_down, FLAG_CMD);
+        CGEventSetFlags(key_down, FLAG_CMD);
+        CGEventSetFlags(key_up, FLAG_CMD);
+        CGEventSetFlags(cmd_up, 0);
+
+        CGEventPost(HID_TAP, cmd_down);
+        thread::sleep(Duration::from_millis(12));
+        CGEventPost(HID_TAP, key_down);
+        thread::sleep(Duration::from_millis(12));
+        CGEventPost(HID_TAP, key_up);
+        thread::sleep(Duration::from_millis(12));
+        CGEventPost(HID_TAP, cmd_up);
+
+        CFRelease(cmd_down);
+        CFRelease(key_down);
+        CFRelease(key_up);
+        CFRelease(cmd_up);
         CFRelease(source);
     }
     Ok(())

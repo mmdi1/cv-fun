@@ -2,6 +2,8 @@ mod append_copy;
 mod commands;
 mod config;
 mod history;
+mod ocr;
+mod paste_popup;
 mod plugins;
 mod watcher;
 
@@ -10,7 +12,7 @@ use config::load_config;
 use history::HistoryStore;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
@@ -80,9 +82,6 @@ fn reapply_app_icon() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn reapply_app_icon() {}
-
 /// Activate the process so our window can come above other apps (hotkey path).
 #[cfg(target_os = "macos")]
 fn activate_app_ignoring_other_apps() {
@@ -113,6 +112,7 @@ fn order_window_front(window: &tauri::WebviewWindow) {
 
 /// Hide main window and Dock icon; keep tray only.
 pub fn hide_to_tray(app: &AppHandle) {
+    paste_popup::hide_paste_popup(app);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
@@ -128,6 +128,7 @@ pub fn show_main(app: &AppHandle) {
     let app = app.clone();
     let app_for_thread = app.clone();
     let _ = app.run_on_main_thread(move || {
+        paste_popup::hide_paste_popup(&app_for_thread);
         #[cfg(target_os = "macos")]
         {
             let _ = app_for_thread.set_activation_policy(ActivationPolicy::Regular);
@@ -150,6 +151,8 @@ pub fn show_main(app: &AppHandle) {
                 order_window_front(&window);
             }
             let _ = window.set_focus();
+            // Tell frontend to focus the search box (hotkey / tray / show).
+            let _ = window.emit("focus-search", ());
         }
 
         // Icon can lag one tick after policy change — apply again shortly after.
@@ -165,6 +168,7 @@ pub fn show_main(app: &AppHandle) {
                     if let Some(window) = app3.get_webview_window("main") {
                         order_window_front(&window);
                         let _ = window.set_focus();
+                        let _ = window.emit("focus-search", ());
                     }
                 });
             });
@@ -183,6 +187,9 @@ pub fn run() {
     let toggle_hotkey = app_config.toggle_hotkey.clone();
     let append_copy_hotkey = app_config.append_copy_hotkey.clone();
     let parse_copy_hotkey = app_config.parse_copy_hotkey.clone();
+    let paste_hotkey = app_config.paste_hotkey.clone();
+    let watch_text = Arc::new(AtomicBool::new(app_config.watch_text));
+    let watch_image = Arc::new(AtomicBool::new(app_config.watch_image));
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -192,6 +199,8 @@ pub fn run() {
             store: Mutex::new(store),
             data_root: data_root.clone(),
             registered_hotkeys: StdMutex::new(Vec::new()),
+            watch_text: Arc::clone(&watch_text),
+            watch_image: Arc::clone(&watch_image),
         })
         .manage(Lifecycle::new())
         .setup(move |app| {
@@ -208,7 +217,7 @@ pub fn run() {
                     .expect("default window icon")
             });
 
-            let mut tray_builder = TrayIconBuilder::with_id("main-tray")
+            let tray_builder = TrayIconBuilder::with_id("main-tray")
                 .icon(tray_icon)
                 .menu(&menu)
                 .tooltip("FunCV")
@@ -239,10 +248,8 @@ pub fn run() {
                 });
 
             #[cfg(target_os = "macos")]
-            {
-                tray_builder = tray_builder.icon_as_template(true);
-            }
-
+            let tray = tray_builder.icon_as_template(true).build(app)?;
+            #[cfg(not(target_os = "macos"))]
             let tray = tray_builder.build(app)?;
             app.manage(TrayHandle(tray));
 
@@ -256,9 +263,19 @@ pub fn run() {
                 });
             }
 
+            // Pre-create hidden paste popup (fast show on hotkey).
+            if let Err(err) = paste_popup::ensure_paste_window(app.handle()) {
+                eprintln!("[nfun-cv] paste window: {err}");
+            }
+
             // Clipboard watcher: thread starts immediately but idles ~900ms before
             // touching NSPasteboard (see watcher.rs) so first drag/click stay smooth.
-            let watcher = ClipboardWatcher::start(app.handle().clone(), poll_ms);
+            let watcher = ClipboardWatcher::start(
+                app.handle().clone(),
+                poll_ms,
+                Arc::clone(&watch_text),
+                Arc::clone(&watch_image),
+            );
             app.manage(WatcherHandle(watcher));
 
             // Defer hotkey + window icon + dock icon off the critical path.
@@ -266,6 +283,7 @@ pub fn run() {
             let hotkey = toggle_hotkey.clone();
             let append_hk = append_copy_hotkey.clone();
             let parse_hk = parse_copy_hotkey.clone();
+            let paste_hk = paste_hotkey.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(120));
 
@@ -282,6 +300,7 @@ pub fn run() {
                         &hotkey,
                         &append_hk,
                         &parse_hk,
+                        &paste_hk,
                     ) {
                         eprintln!("[nfun-cv] register hotkeys failed: {err}");
                     }
@@ -303,14 +322,24 @@ pub fn run() {
             commands::list_history,
             commands::delete_history,
             commands::clear_history,
+            commands::set_history_pinned,
+            commands::set_history_favorited,
+            commands::set_history_note,
             commands::get_history_item,
             commands::copy_history,
             commands::resolve_image_path,
+            commands::ocr_history_image,
             commands::get_config,
             commands::save_app_config,
             commands::data_root_path,
+            commands::export_data,
+            commands::import_data,
             commands::hide_main_window,
             commands::show_main_window,
+            commands::list_paste_history,
+            commands::hide_paste_popup,
+            commands::paste_history_item,
+            commands::open_main_from_paste,
             commands::get_fun_stats,
             commands::list_plugins,
             commands::set_plugin_enabled,

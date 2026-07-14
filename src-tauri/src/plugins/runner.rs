@@ -1,4 +1,5 @@
 use super::manifest::PluginRuntime;
+use super::ocr_plugin::run_builtin_image_ocr;
 use super::registry::{list_plugins, resolve_plugin};
 use super::translate::run_builtin_translate;
 use serde::{Deserialize, Serialize};
@@ -69,6 +70,7 @@ pub fn run_plugin(
     let mut out = match manifest.runtime {
         PluginRuntime::Builtin => match plugin_id {
             "translate-en-zh" => run_builtin_translate(data_root, input)?,
+            "image-ocr" => run_builtin_image_ocr(data_root, input)?,
             other => PluginOutput::fail(other, "未知内置插件"),
         },
         PluginRuntime::Node

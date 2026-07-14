@@ -61,6 +61,12 @@ pub struct HistoryItem {
     pub last_used_at: DateTime<Utc>,
     pub use_count: i64,
     pub pinned: bool,
+    /// User favorite / bookmark (independent of pin).
+    #[serde(default)]
+    pub favorited: bool,
+    /// Optional note (esp. for favorites); included in search.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -185,7 +191,9 @@ impl HistoryStore {
                 copied_at TEXT NOT NULL,
                 last_used_at TEXT NOT NULL,
                 use_count INTEGER NOT NULL DEFAULT 1,
-                pinned INTEGER NOT NULL DEFAULT 0
+                pinned INTEGER NOT NULL DEFAULT 0,
+                favorited INTEGER NOT NULL DEFAULT 0,
+                note TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_history_copied_at ON history(copied_at DESC);
             CREATE INDEX IF NOT EXISTS idx_history_hash ON history(hash);
@@ -225,6 +233,12 @@ impl HistoryStore {
                 image INTEGER NOT NULL DEFAULT 0
             );",
         )?;
+        // Migrations for existing installs
+        let _ = conn.execute(
+            "ALTER TABLE history ADD COLUMN favorited INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE history ADD COLUMN note TEXT", []);
         Ok(())
     }
 
@@ -277,10 +291,12 @@ impl HistoryStore {
 
         let id = Uuid::new_v4().simple().to_string();
         let rel = format!("images/{id}.png");
-        let abs = self.root.join(&rel);
+        let abs = self.images_dir.join(format!("{id}.png"));
         let img = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or_else(|| {
             HistoryError::Message("invalid image buffer dimensions".into())
         })?;
+        // Ensure dir still exists (user may have cleaned it)
+        fs::create_dir_all(&self.images_dir)?;
         img.save(&abs)
             .map_err(|e| HistoryError::Message(format!("save image: {e}")))?;
 
@@ -372,9 +388,9 @@ impl HistoryStore {
         if q.is_empty() {
             let mut stmt = conn.prepare(
                 "SELECT id, kind, NULL, preview, hash, image_path, image_width, image_height,
-                        copied_at, last_used_at, use_count, pinned
+                        copied_at, last_used_at, use_count, pinned, favorited, note
                  FROM history
-                 ORDER BY pinned DESC, copied_at DESC
+                 ORDER BY copied_at DESC
                  LIMIT 500",
             )?;
             for row in stmt.query_map([], |row| map_row(row))? {
@@ -384,11 +400,12 @@ impl HistoryStore {
             let pattern = format!("%{}%", escape_like(q));
             let mut stmt = conn.prepare(
                 "SELECT id, kind, NULL, preview, hash, image_path, image_width, image_height,
-                        copied_at, last_used_at, use_count, pinned
+                        copied_at, last_used_at, use_count, pinned, favorited, note
                  FROM history
                  WHERE preview LIKE ?1 ESCAPE '\\'
                     OR IFNULL(text, '') LIKE ?1 ESCAPE '\\'
-                 ORDER BY pinned DESC, copied_at DESC
+                    OR IFNULL(note, '') LIKE ?1 ESCAPE '\\'
+                 ORDER BY copied_at DESC
                  LIMIT 500",
             )?;
             for row in stmt.query_map(params![pattern], |row| map_row(row))? {
@@ -402,11 +419,56 @@ impl HistoryStore {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, kind, text, preview, hash, image_path, image_width, image_height,
-                    copied_at, last_used_at, use_count, pinned
+                    copied_at, last_used_at, use_count, pinned, favorited, note
              FROM history WHERE id = ?1",
         )?;
         stmt.query_row(params![id], |row| map_row(row))
             .map_err(|_| HistoryError::Message(format!("history item {id} not found")))
+    }
+
+    pub fn set_pinned(&self, id: &str, pinned: bool) -> HistoryResult<HistoryItem> {
+        {
+            let conn = self.conn.lock();
+            let n = conn.execute(
+                "UPDATE history SET pinned = ?1 WHERE id = ?2",
+                params![if pinned { 1 } else { 0 }, id],
+            )?;
+            if n == 0 {
+                return Err(HistoryError::Message(format!("history item {id} not found")));
+            }
+        }
+        self.get(id)
+    }
+
+    pub fn set_favorited(&self, id: &str, favorited: bool) -> HistoryResult<HistoryItem> {
+        {
+            let conn = self.conn.lock();
+            let n = conn.execute(
+                "UPDATE history SET favorited = ?1 WHERE id = ?2",
+                params![if favorited { 1 } else { 0 }, id],
+            )?;
+            if n == 0 {
+                return Err(HistoryError::Message(format!("history item {id} not found")));
+            }
+        }
+        self.get(id)
+    }
+
+    /// Set free-form note (trimmed; empty clears). Used for favorite search tags.
+    pub fn set_note(&self, id: &str, note: &str) -> HistoryResult<HistoryItem> {
+        let note = note.trim();
+        let note_db: Option<&str> = if note.is_empty() { None } else { Some(note) };
+        {
+            let conn = self.conn.lock();
+            let n = conn.execute(
+                "UPDATE history SET note = ?1 WHERE id = ?2",
+                params![note_db, id],
+            )?;
+            if n == 0 {
+                return Err(HistoryError::Message(format!("history item {id} not found")));
+            }
+        }
+        self.get(id)
     }
 
     pub fn delete(&self, id: &str) -> HistoryResult<()> {
@@ -419,17 +481,48 @@ impl HistoryStore {
         Ok(())
     }
 
-    pub fn clear(&self) -> HistoryResult<()> {
+    /// Clear history by mode. Returns number of deleted rows.
+    /// - `keep_saved`: delete only items that are neither pinned nor favorited
+    /// - `keep_favorites`: delete non-favorited (pinned-only still deleted)
+    /// - `all`: delete everything
+    pub fn clear(&self, mode: &str) -> HistoryResult<usize> {
+        let mode = mode.trim().to_ascii_lowercase();
+        let where_sql = match mode.as_str() {
+            "keep_saved" | "unprotected" | "normal" => "pinned = 0 AND favorited = 0",
+            "keep_favorites" | "non_favorites" => "favorited = 0",
+            "all" => "1 = 1",
+            other => {
+                return Err(HistoryError::Message(format!(
+                    "unknown clear mode: {other}"
+                )));
+            }
+        };
+
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM history", [])?;
+        // Collect image files to remove before delete
+        let sql_sel = format!("SELECT id, image_path FROM history WHERE {where_sql}");
+        let mut stmt = conn.prepare(&sql_sel)?;
+        let doomed: Vec<(String, Option<String>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        let n = doomed.len();
+        if n == 0 {
+            return Ok(0);
+        }
+
+        let sql_del = format!("DELETE FROM history WHERE {where_sql}");
+        conn.execute(&sql_del, [])?;
         drop(conn);
-        if self.images_dir.exists() {
-            for entry in fs::read_dir(&self.images_dir)? {
-                let entry = entry?;
-                let _ = fs::remove_file(entry.path());
+
+        for (_id, image_path) in doomed {
+            if let Some(rel) = image_path {
+                let _ = fs::remove_file(self.root.join(rel));
             }
         }
-        Ok(())
+        Ok(n)
     }
 
     pub fn mark_used(&self, id: &str) -> HistoryResult<()> {
@@ -440,6 +533,499 @@ impl HistoryStore {
             params![now, id],
         )?;
         Ok(())
+    }
+
+    /// List items that are pinned and/or favorited (full text included).
+    pub fn list_saved(&self) -> HistoryResult<Vec<HistoryItem>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, text, preview, hash, image_path, image_width, image_height,
+                    copied_at, last_used_at, use_count, pinned, favorited, note
+             FROM history
+             WHERE pinned = 1 OR favorited = 1
+             ORDER BY pinned DESC, favorited DESC, copied_at DESC",
+        )?;
+        let mut items = Vec::new();
+        for row in stmt.query_map([], |row| map_row(row))? {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    /**
+     * Export pinned/favorited items as a portable package under `dest_dir`:
+     *   FunCV-saved-YYYYMMDD-HHMMSS/
+     *     export.json
+     *     images/… (optional)
+     * Returns the created folder path and item count.
+     */
+    pub fn export_saved(
+        &self,
+        dest_parent: &Path,
+        include_images: bool,
+    ) -> HistoryResult<(PathBuf, usize)> {
+        let items = self.list_saved()?;
+        if items.is_empty() {
+            return Err(HistoryError::Message("没有可导出的钉住/收藏记录".into()));
+        }
+
+        let stamp = Local::now().format("%Y%m%d-%H%M%S");
+        let out_dir = dest_parent.join(format!("FunCV-saved-{stamp}"));
+        fs::create_dir_all(&out_dir)?;
+        let images_out = out_dir.join("images");
+        if include_images {
+            fs::create_dir_all(&images_out)?;
+        }
+
+        let mut export_items: Vec<serde_json::Value> = Vec::with_capacity(items.len());
+        for it in &items {
+            let mut image_file: Option<String> = None;
+            if include_images {
+                if let Some(rel) = it.image_path.as_ref() {
+                    let src = self.root.join(rel);
+                    if src.exists() {
+                        let name = Path::new(rel)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("image.png");
+                        let dest = images_out.join(name);
+                        // Avoid overwrite collisions
+                        let dest = if dest.exists() {
+                            images_out.join(format!("{}-{}", &it.id[..8.min(it.id.len())], name))
+                        } else {
+                            dest
+                        };
+                        fs::copy(&src, &dest).map_err(|e| {
+                            HistoryError::Message(format!("复制图片失败 {}: {e}", src.display()))
+                        })?;
+                        image_file = Some(format!(
+                            "images/{}",
+                            dest.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or(name)
+                        ));
+                    }
+                }
+            }
+
+            export_items.push(serde_json::json!({
+                "id": it.id,
+                "kind": it.kind.as_str(),
+                "text": it.text,
+                "preview": it.preview,
+                "hash": it.hash,
+                "imageWidth": it.image_width,
+                "imageHeight": it.image_height,
+                "copiedAt": it.copied_at.to_rfc3339(),
+                "lastUsedAt": it.last_used_at.to_rfc3339(),
+                "useCount": it.use_count,
+                "pinned": it.pinned,
+                "favorited": it.favorited,
+                "note": it.note,
+                "imageFile": image_file,
+            }));
+        }
+
+        let payload = serde_json::json!({
+            "format": "nfun-cv-saved-export",
+            "version": 1,
+            "exportedAt": Utc::now().to_rfc3339(),
+            "includeImages": include_images,
+            "count": export_items.len(),
+            "items": export_items,
+        });
+        let json_path = out_dir.join("export.json");
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|e| HistoryError::Message(format!("serialize export: {e}")))?;
+        fs::write(&json_path, json)?;
+
+        Ok((out_dir, export_items.len()))
+    }
+
+    /**
+     * Full backup: checkpoint WAL then copy history.db (+ wal/shm if present),
+     * images/, and optionally config.json into a timestamped folder.
+     */
+    pub fn export_full(
+        &self,
+        dest_parent: &Path,
+        include_config: bool,
+    ) -> HistoryResult<(PathBuf, usize)> {
+        let stamp = Local::now().format("%Y%m%d-%H%M%S");
+        let out_dir = dest_parent.join(format!("FunCV-full-{stamp}"));
+        fs::create_dir_all(&out_dir)?;
+
+        // Hold lock and checkpoint so the on-disk main DB is consistent.
+        let count = {
+            let conn = self.conn.lock();
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            let n: i64 = conn
+                .query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))
+                .unwrap_or(0);
+            n as usize
+        };
+
+        let db_src = self.root.join("history.db");
+        if !db_src.exists() {
+            return Err(HistoryError::Message("history.db 不存在".into()));
+        }
+        fs::copy(&db_src, out_dir.join("history.db")).map_err(|e| {
+            HistoryError::Message(format!("复制 history.db 失败: {e}"))
+        })?;
+
+        for extra in ["history.db-wal", "history.db-shm"] {
+            let p = self.root.join(extra);
+            if p.exists() {
+                let _ = fs::copy(&p, out_dir.join(extra));
+            }
+        }
+
+        // Copy images directory
+        let images_src = self.images_dir.clone();
+        let images_dst = out_dir.join("images");
+        if images_src.exists() {
+            copy_dir_recursive(&images_src, &images_dst)?;
+        } else {
+            fs::create_dir_all(&images_dst)?;
+        }
+
+        if include_config {
+            let cfg = self.root.join("config.json");
+            if cfg.exists() {
+                let _ = fs::copy(&cfg, out_dir.join("config.json"));
+            }
+        }
+
+        // Small readme for humans
+        let readme = format!(
+            "FunCV 完整备份\n导出时间: {}\n历史条数: {}\n\n恢复说明:\n1. 退出 FunCV\n2. 将 history.db 与 images/ 复制到应用数据目录（覆盖）\n3. 可选恢复 config.json\n4. 重新打开 FunCV\n",
+            Utc::now().to_rfc3339(),
+            count
+        );
+        let _ = fs::write(out_dir.join("README.txt"), readme);
+
+        Ok((out_dir, count))
+    }
+
+    /// Import package from `export_saved` (export.json + optional images/).
+    /// Merges by content hash: existing rows get pin/fav/note updated; new rows inserted.
+    /// Returns (imported_or_updated, skipped).
+    pub fn import_saved(&self, package_dir: &Path) -> HistoryResult<(usize, usize)> {
+        let json_path = resolve_export_json(package_dir)?;
+        let raw = fs::read_to_string(&json_path).map_err(|e| {
+            HistoryError::Message(format!("读取 export.json 失败: {e}"))
+        })?;
+        let root: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| HistoryError::Message(format!("解析 export.json 失败: {e}")))?;
+
+        let format = root.get("format").and_then(|v| v.as_str()).unwrap_or("");
+        if format != "nfun-cv-saved-export" && root.get("items").is_none() {
+            return Err(HistoryError::Message(
+                "不是 FunCV 收藏导出包（缺少 export.json 或 format 不匹配）".into(),
+            ));
+        }
+
+        let items = root
+            .get("items")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| HistoryError::Message("export.json 缺少 items".into()))?;
+
+        let package_root = json_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| package_dir.to_path_buf());
+
+        let mut imported = 0usize;
+        let mut skipped = 0usize;
+        fs::create_dir_all(&self.images_dir)?;
+
+        for raw_item in items {
+            match self.import_one_saved_item(raw_item, &package_root) {
+                Ok(true) => imported += 1,
+                Ok(false) => skipped += 1,
+                Err(e) => {
+                    eprintln!("[nfun-cv] import saved item skip: {e}");
+                    skipped += 1;
+                }
+            }
+        }
+
+        if imported == 0 && skipped == 0 {
+            return Err(HistoryError::Message("导出包中没有条目".into()));
+        }
+        Ok((imported, skipped))
+    }
+
+    fn import_one_saved_item(
+        &self,
+        raw: &serde_json::Value,
+        package_root: &Path,
+    ) -> HistoryResult<bool> {
+        let kind_s = raw
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text");
+        let kind = ItemKind::parse(kind_s);
+        let hash = raw
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let pinned = raw.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+        let favorited = raw
+            .get("favorited")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let note = raw
+            .get("note")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let preview = raw
+            .get("preview")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let text = raw
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let image_width = raw
+            .get("imageWidth")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let image_height = raw
+            .get("imageHeight")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        let conn = self.conn.lock();
+
+        // Existing by hash → merge flags / note
+        if !hash.is_empty() {
+            if let Some(existing) = find_by_hash(&conn, &hash)? {
+                let new_pin = existing.pinned || pinned;
+                let new_fav = existing.favorited || favorited;
+                let new_note = note.clone().or(existing.note.clone());
+                conn.execute(
+                    "UPDATE history SET pinned=?1, favorited=?2, note=?3 WHERE id=?4",
+                    params![
+                        if new_pin { 1 } else { 0 },
+                        if new_fav { 1 } else { 0 },
+                        new_note,
+                        existing.id
+                    ],
+                )?;
+                return Ok(true);
+            }
+        }
+
+        // New image: copy file into data root
+        let mut image_path: Option<String> = None;
+        if kind == ItemKind::Image {
+            if let Some(rel) = raw.get("imageFile").and_then(|v| v.as_str()) {
+                let src = package_root.join(rel);
+                if src.exists() {
+                    let name = src
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("image.png");
+                    let id_hint = raw
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let dest_name = if id_hint.is_empty() {
+                        format!("{}.png", Uuid::new_v4().simple())
+                    } else {
+                        // keep original basename if free
+                        let candidate = self.images_dir.join(name);
+                        if candidate.exists() {
+                            format!("{id_hint}.png")
+                        } else {
+                            name.to_string()
+                        }
+                    };
+                    let dest = self.images_dir.join(&dest_name);
+                    fs::copy(&src, &dest).map_err(|e| {
+                        HistoryError::Message(format!("导入图片失败: {e}"))
+                    })?;
+                    image_path = Some(format!("images/{dest_name}"));
+                }
+            }
+            if image_path.is_none() {
+                return Ok(false); // image package missing file
+            }
+        }
+
+        if kind == ItemKind::Text && text.as_ref().map(|t| t.trim().is_empty()).unwrap_or(true) {
+            return Ok(false);
+        }
+
+        let id = raw
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+
+        // If id collides, generate new
+        let id_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM history WHERE id=?1",
+                params![id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        let id = if id_exists {
+            Uuid::new_v4().simple().to_string()
+        } else {
+            id
+        };
+
+        let hash = if hash.is_empty() {
+            if let Some(ref t) = text {
+                hash_bytes(t.as_bytes())
+            } else if let Some(ref rel) = image_path {
+                let bytes = fs::read(self.root.join(rel)).unwrap_or_default();
+                hash_bytes(&bytes)
+            } else {
+                hash_bytes(id.as_bytes())
+            }
+        } else {
+            hash
+        };
+
+        let preview = if preview.is_empty() {
+            text.as_ref()
+                .map(|t| preview_text(t))
+                .unwrap_or_else(|| "导入条目".into())
+        } else {
+            preview
+        };
+
+        let now = Utc::now();
+        let copied_at = raw
+            .get("copiedAt")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or(now);
+        let last_used_at = raw
+            .get("lastUsedAt")
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or(copied_at);
+        let use_count = raw.get("useCount").and_then(|v| v.as_i64()).unwrap_or(1);
+
+        conn.execute(
+            "INSERT INTO history (
+                id, kind, text, preview, hash, image_path, image_width, image_height,
+                copied_at, last_used_at, use_count, pinned, favorited, note
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            params![
+                id,
+                kind.as_str(),
+                text,
+                preview,
+                hash,
+                image_path,
+                image_width.map(|v| v as i64),
+                image_height.map(|v| v as i64),
+                copied_at.to_rfc3339(),
+                last_used_at.to_rfc3339(),
+                use_count,
+                if pinned { 1 } else { 0 },
+                if favorited { 1 } else { 0 },
+                note,
+            ],
+        )?;
+        // Soft trim — keep imports
+        trim(&conn, &self.root, self.max_items)?;
+        Ok(true)
+    }
+
+    /// Restore full backup folder (history.db + images [+ config.json]).
+    /// Replaces current history database. Returns row count after import.
+    pub fn import_full(
+        &self,
+        package_dir: &Path,
+        include_config: bool,
+    ) -> HistoryResult<usize> {
+        let src_db = package_dir.join("history.db");
+        if !src_db.is_file() {
+            return Err(HistoryError::Message(
+                "不是完整备份包（缺少 history.db）".into(),
+            ));
+        }
+
+        // Close live connection so we can replace the file.
+        {
+            let mut conn = self.conn.lock();
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+            // Swap to in-memory to release history.db handle
+            let mem = Connection::open_in_memory().map_err(HistoryError::from)?;
+            let old = std::mem::replace(&mut *conn, mem);
+            drop(old);
+        }
+
+        let dst_db = self.root.join("history.db");
+        // Remove local WAL/SHM so they don't pair with replaced main db
+        for extra in ["history.db-wal", "history.db-shm"] {
+            let p = self.root.join(extra);
+            let _ = fs::remove_file(p);
+        }
+
+        fs::copy(&src_db, &dst_db).map_err(|e| {
+            HistoryError::Message(format!("写入 history.db 失败: {e}"))
+        })?;
+        for extra in ["history.db-wal", "history.db-shm"] {
+            let p = package_dir.join(extra);
+            if p.exists() {
+                let _ = fs::copy(&p, self.root.join(extra));
+            }
+        }
+
+        // Replace images directory
+        let src_images = package_dir.join("images");
+        if src_images.is_dir() {
+            if self.images_dir.exists() {
+                let _ = fs::remove_dir_all(&self.images_dir);
+            }
+            copy_dir_recursive(&src_images, &self.images_dir)?;
+        } else {
+            fs::create_dir_all(&self.images_dir)?;
+        }
+
+        if include_config {
+            let src_cfg = package_dir.join("config.json");
+            if src_cfg.is_file() {
+                let _ = fs::copy(&src_cfg, self.root.join("config.json"));
+            }
+        }
+
+        // Reopen DB
+        {
+            let mut conn = self.conn.lock();
+            let opened = Connection::open(&dst_db).map_err(HistoryError::from)?;
+            let _ = opened.execute_batch(
+                "PRAGMA synchronous=NORMAL;
+                 PRAGMA foreign_keys=ON;
+                 PRAGMA temp_store=MEMORY;
+                 PRAGMA journal_mode=WAL;",
+            );
+            *conn = opened;
+        }
+
+        // Ensure schema (migrations) on imported db
+        self.init_schema()?;
+
+        let conn = self.conn.lock();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))
+            .unwrap_or(0);
+        Ok(n as usize)
     }
 
     /// Fun stats for UI (total / today / top repeats / streak).
@@ -688,7 +1274,7 @@ fn compute_streak(days_desc: &[String], today: &str) -> i64 {
 fn find_by_hash(conn: &Connection, hash: &str) -> HistoryResult<Option<HistoryItem>> {
     let mut stmt = conn.prepare(
         "SELECT id, kind, text, preview, hash, image_path, image_width, image_height,
-                copied_at, last_used_at, use_count, pinned
+                copied_at, last_used_at, use_count, pinned, favorited, note
          FROM history WHERE hash = ?1 LIMIT 1",
     )?;
     let item = stmt
@@ -741,12 +1327,14 @@ fn insert_new(
         last_used_at: now,
         use_count: 1,
         pinned: false,
+        favorited: false,
+        note: None,
     };
     conn.execute(
         "INSERT INTO history (
             id, kind, text, preview, hash, image_path, image_width, image_height,
-            copied_at, last_used_at, use_count, pinned
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            copied_at, last_used_at, use_count, pinned, favorited, note
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         params![
             item.id,
             item.kind.as_str(),
@@ -760,6 +1348,8 @@ fn insert_new(
             item.last_used_at.to_rfc3339(),
             item.use_count,
             if item.pinned { 1 } else { 0 },
+            if item.favorited { 1 } else { 0 },
+            item.note,
         ],
     )?;
     trim(conn, root, max_items)?;
@@ -767,10 +1357,12 @@ fn insert_new(
 }
 
 fn trim(conn: &Connection, root: &Path, max_items: usize) -> HistoryResult<()> {
-    let count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM history WHERE pinned = 0", [], |r| {
-            r.get(0)
-        })?;
+    // Keep pinned and favorited items outside the max_items budget
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM history WHERE pinned = 0 AND favorited = 0",
+        [],
+        |r| r.get(0),
+    )?;
     let max = max_items as i64;
     if count <= max {
         return Ok(());
@@ -778,7 +1370,7 @@ fn trim(conn: &Connection, root: &Path, max_items: usize) -> HistoryResult<()> {
     let overflow = count - max;
     let mut stmt = conn.prepare(
         "SELECT id, image_path FROM history
-         WHERE pinned = 0
+         WHERE pinned = 0 AND favorited = 0
          ORDER BY copied_at ASC
          LIMIT ?1",
     )?;
@@ -800,6 +1392,17 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryItem> {
     let copied_at: String = row.get(8)?;
     let last_used_at: String = row.get(9)?;
     let pinned: i64 = row.get(11)?;
+    // favorited / note may be missing on very old rows if migration failed
+    let favorited: i64 = row.get(12).unwrap_or(0);
+    let note: Option<String> = row.get(13).unwrap_or(None);
+    let note = note.and_then(|s| {
+        let t = s.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    });
     Ok(HistoryItem {
         id: row.get(0)?,
         kind: ItemKind::parse(&kind),
@@ -817,6 +1420,8 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryItem> {
             .unwrap_or_else(|_| Utc::now()),
         use_count: row.get(10)?,
         pinned: pinned != 0,
+        favorited: favorited != 0,
+        note,
     })
 }
 
@@ -831,6 +1436,43 @@ fn escape_like(input: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+fn resolve_export_json(package_dir: &Path) -> HistoryResult<PathBuf> {
+    let direct = package_dir.join("export.json");
+    if direct.is_file() {
+        return Ok(direct);
+    }
+    if package_dir.is_file()
+        && package_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("export.json"))
+            .unwrap_or(false)
+    {
+        return Ok(package_dir.to_path_buf());
+    }
+    Err(HistoryError::Message(
+        "未找到 export.json（请选择导出生成的 FunCV-saved-… 目录）".into(),
+    ))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> HistoryResult<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if ty.is_file() {
+            fs::copy(&from, &to).map_err(|e| {
+                HistoryError::Message(format!("复制文件失败 {}: {e}", from.display()))
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn preview_text(text: &str) -> String {

@@ -15,6 +15,9 @@ export type HistoryItem = {
   lastUsedAt: string;
   useCount: number;
   pinned: boolean;
+  favorited?: boolean;
+  /** Optional remark for favorites; searchable */
+  note?: string | null;
 };
 
 export type AppConfig = {
@@ -32,6 +35,15 @@ export type AppConfig = {
    * Empty string disables. e.g. Shift+Option+X
    */
   parseCopyHotkey: string;
+  /**
+   * Quick paste popup at cursor.
+   * Empty string disables. e.g. Cmd+F2
+   */
+  pasteHotkey: string;
+  /** Listen for text clipboard (default true). */
+  watchText: boolean;
+  /** Listen for image clipboard (default true). */
+  watchImage: boolean;
 };
 
 /**

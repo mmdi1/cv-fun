@@ -21,8 +21,21 @@ export function deleteHistory(id: string) {
   return invoke<void>("delete_history", { id });
 }
 
-export function clearHistory() {
-  return invoke<void>("clear_history");
+/** Clear history. mode: keep_saved | keep_favorites | all. Returns deleted count. */
+export function clearHistory(mode: "keep_saved" | "keep_favorites" | "all" = "all") {
+  return invoke<number>("clear_history", { mode });
+}
+
+export function setHistoryPinned(id: string, pinned: boolean) {
+  return invoke<HistoryItem>("set_history_pinned", { id, pinned });
+}
+
+export function setHistoryFavorited(id: string, favorited: boolean) {
+  return invoke<HistoryItem>("set_history_favorited", { id, favorited });
+}
+
+export function setHistoryNote(id: string, note: string) {
+  return invoke<HistoryItem>("set_history_note", { id, note });
 }
 
 /** Copy item; optional textOverride writes inferred/transformed text instead of stored raw. */
@@ -37,6 +50,11 @@ export function resolveImagePath(id: string) {
   return invoke<string>("resolve_image_path", { id });
 }
 
+/** Local OCR for a history image (macOS Vision / Windows Media.Ocr). */
+export function ocrHistoryImage(id: string) {
+  return invoke<string>("ocr_history_image", { id });
+}
+
 export function getConfig() {
   return invoke<AppConfig>("get_config");
 }
@@ -49,12 +67,71 @@ export function dataRootPath() {
   return invoke<string>("data_root_path");
 }
 
+export type ExportResult = {
+  path: string;
+  count: number;
+  mode: string;
+};
+
+export type ImportResult = {
+  mode: string;
+  path: string;
+  count: number;
+  skipped: number;
+};
+
+/** Export history package. mode: saved | full */
+export function exportData(
+  mode: "saved" | "full",
+  destDir: string,
+  opts?: { includeImages?: boolean; includeConfig?: boolean },
+) {
+  return invoke<ExportResult>("export_data", {
+    mode,
+    destDir,
+    includeImages: opts?.includeImages ?? true,
+    includeConfig: opts?.includeConfig ?? true,
+  });
+}
+
+/** Import package. mode: saved | full | auto */
+export function importData(
+  mode: "saved" | "full" | "auto",
+  sourcePath: string,
+  opts?: { includeConfig?: boolean },
+) {
+  return invoke<ImportResult>("import_data", {
+    mode,
+    sourcePath,
+    includeConfig: opts?.includeConfig ?? true,
+  });
+}
+
 export function hideMainWindow() {
   return invoke<void>("hide_main_window");
 }
 
 export function showMainWindow() {
   return invoke<void>("show_main_window");
+}
+
+/** Recent history for quick-paste popup (max 12). */
+export function listPasteHistory() {
+  return invoke<HistoryItem[]>("list_paste_history");
+}
+
+export function hidePastePopup() {
+  return invoke<void>("hide_paste_popup");
+}
+
+/** Copy item to clipboard and simulate paste into previous app. */
+export function pasteHistoryItem(id: string) {
+  return invoke<void>("paste_history_item", { id });
+}
+
+/** From paste popup: open main UI. */
+export function openMainFromPaste() {
+  return invoke<void>("open_main_from_paste");
 }
 
 export function getFunStats() {

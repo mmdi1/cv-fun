@@ -90,15 +90,45 @@ impl PluginInfo {
 
 /// Builtin plugin definitions (no files required).
 pub fn builtin_manifests() -> Vec<PluginManifest> {
-    vec![PluginManifest {
-        id: "translate-en-zh".into(),
-        name: "英汉互译".into(),
-        version: "1.0.0".into(),
-        runtime: PluginRuntime::Builtin,
-        entry: String::new(),
-        description: "本地 ECDICT 词典：英文查中文，中文反查英文词条。需先下载词典资源。".into(),
-        types: vec!["text".into()],
-        enabled: true,
-        builtin: true,
-    }]
+    vec![
+        PluginManifest {
+            id: "translate-en-zh".into(),
+            name: "英汉互译".into(),
+            version: "1.0.0".into(),
+            runtime: PluginRuntime::Builtin,
+            entry: String::new(),
+            description: "本地 ECDICT 词典：英文查中文，中文反查英文词条。需先下载词典资源。"
+                .into(),
+            types: vec!["text".into()],
+            enabled: true,
+            builtin: true,
+        },
+        PluginManifest {
+            id: "image-ocr".into(),
+            name: "图片文字识别".into(),
+            version: "1.0.0".into(),
+            runtime: PluginRuntime::Builtin,
+            entry: String::new(),
+            description: image_ocr_description().into(),
+            types: vec!["img".into()],
+            // Default on: image panel button + optional plugin suggestions
+            enabled: true,
+            builtin: true,
+        },
+    ]
+}
+
+fn image_ocr_description() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "本地 OCR：macOS 系统 Vision 框架，无需联网/下载模型。图片详情点「识别文字」。"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "本地 OCR：Windows.Media.Ocr（系统能力）。图片详情点「识别文字」。可在插件列表关闭。"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "图片文字识别（当前平台需自行扩展）。"
+    }
 }

@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import * as api from "./api";
 import CodeEditor from "./components/CodeEditor.vue";
 import { useHistory } from "./composables/useHistory";
@@ -12,7 +14,7 @@ import { useStatus } from "./composables/useStatus";
 import { CODE_LANG_LABEL, detectCodeLang } from "./utils/langDetect";
 import { tryEvalMath } from "./utils/mathEval";
 import { formatHistoryTime } from "./utils/time";
-import { tryAbsoluteTimestampPanel } from "./utils/timestampAbs";
+import { tryAbsoluteTimestampPanel, type AbsParseRow } from "./utils/timestampAbs";
 import {
   buildAbsDictPanel,
   isAbsoluteDictQuery,
@@ -37,12 +39,14 @@ const {
   suggestions,
   appliedSuggestionId,
   isShowingOriginal,
-  itemCountLabel,
   formatBadge,
   loadHistory,
   deleteItem,
+  togglePinned,
+  toggleFavorited,
+  saveNote,
   copyItem,
-  clearAll,
+  clearHistory,
   applySuggestion,
   applyAndCopySuggestion,
   showOriginal,
@@ -50,6 +54,95 @@ const {
   disposeHistory,
   refreshPluginSuggestions,
 } = useHistory(setStatus);
+
+/**
+ * Left list tabs: 历史 keeps all records (pin/fav marks stay visible);
+ * 钉住 / 收藏 are quick filters only — items do not leave the history feed.
+ */
+type HistTab = "history" | "pinned" | "favorites";
+const histTab = ref<HistTab>("history");
+
+const histTabCounts = computed(() => {
+  let pinned = 0;
+  let favorites = 0;
+  for (const i of items.value) {
+    if (i.pinned) pinned += 1;
+    if (i.favorited) favorites += 1;
+  }
+  return {
+    history: items.value.length,
+    pinned,
+    favorites,
+  };
+});
+
+const tabItems = computed(() => {
+  if (histTab.value === "pinned") {
+    return items.value.filter((i) => i.pinned);
+  }
+  if (histTab.value === "favorites") {
+    return items.value.filter((i) => i.favorited);
+  }
+  // 历史：全部记录（含钉住/收藏），按时间排序
+  return items.value;
+});
+
+const tabCountLabel = computed(() => `${tabItems.value.length}`);
+
+const clearMenuOpen = ref(false);
+
+const clearStats = computed(() => {
+  const all = items.value.length;
+  const fav = items.value.filter((i) => i.favorited).length;
+  const saved = items.value.filter((i) => i.pinned || i.favorited).length;
+  return {
+    all,
+    fav,
+    plain: Math.max(0, all - saved),
+  };
+});
+
+function toggleClearMenu() {
+  if (!items.value.length) return;
+  clearMenuOpen.value = !clearMenuOpen.value;
+}
+
+async function onClearMode(mode: "keep_saved" | "all") {
+  clearMenuOpen.value = false;
+  if (!items.value.length) return;
+
+  if (mode === "all") {
+    const fav = clearStats.value.fav;
+    const msg =
+      fav > 0
+        ? `将删除全部 ${clearStats.value.all} 条记录（含 ${fav} 条收藏），确定？`
+        : `将删除全部 ${clearStats.value.all} 条记录，确定？`;
+    let ok = false;
+    try {
+      ok = await ask(msg, {
+        title: "全部清空",
+        kind: "warning",
+        okLabel: "全部删除",
+        cancelLabel: "取消",
+      });
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      setStatus("已取消清空", "muted");
+      return;
+    }
+  }
+
+  await clearHistory(mode);
+}
+
+function onGlobalPointerDown(ev: MouseEvent) {
+  const t = ev.target as HTMLElement | null;
+  if (!t?.closest?.(".clear-menu-wrap")) {
+    clearMenuOpen.value = false;
+  }
+}
 
 /** Recognized language chip for syntax-highlighted panel text. */
 const detectedLangLabel = computed(() => {
@@ -182,6 +275,120 @@ const contentFitsHalf = computed(() => {
   return estimatePanelContentHeight() <= half + 4;
 });
 
+/** Favorite note editor (shown under detail head when favorited). */
+const noteDraft = ref("");
+const noteSaving = ref(false);
+const noteInputEl = ref<HTMLInputElement | null>(null);
+const noteFocusToken = ref(0);
+
+watch(
+  () => selectedItem.value?.id,
+  () => {
+    noteDraft.value = selectedItem.value?.note?.trim() || "";
+  },
+);
+
+watch(
+  () => selectedItem.value?.note,
+  (n) => {
+    // Sync when patch updates note without id change
+    if (!noteSaving.value) {
+      noteDraft.value = n?.trim() || "";
+    }
+  },
+);
+
+async function onToggleFavorite() {
+  const item = selectedItem.value;
+  if (!item) return;
+  const wasFav = !!item.favorited;
+  const nowFav = await toggleFavorited(item);
+  // After first favorite: focus note field so user can tag it for search
+  if (nowFav && !wasFav) {
+    noteDraft.value = selectedItem.value?.note?.trim() || "";
+    noteFocusToken.value += 1;
+    await nextTick();
+    noteInputEl.value?.focus();
+  }
+}
+
+async function onSaveNote() {
+  const item = selectedItem.value;
+  if (!item?.favorited) return;
+  noteSaving.value = true;
+  try {
+    await saveNote(item, noteDraft.value);
+  } finally {
+    noteSaving.value = false;
+  }
+}
+
+/** Image OCR result (local Vision / Windows OCR). */
+const ocrBusy = ref(false);
+const ocrText = ref("");
+const ocrError = ref("");
+const ocrForId = ref<string | null>(null);
+
+watch(
+  () => selectedItem.value?.id,
+  () => {
+    ocrText.value = "";
+    ocrError.value = "";
+    ocrForId.value = null;
+    ocrBusy.value = false;
+  },
+);
+
+const imageOcrRows = computed<AbsParseRow[] | null>(() => {
+  if (!selectedItem.value || selectedItem.value.kind !== "image") return null;
+  if (ocrForId.value !== selectedItem.value.id) return null;
+  const text = ocrText.value.trim();
+  if (!text) return null;
+  const lines = text
+    .split(/\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  // First row = full OCR text (one click copies everything); then per-line rows.
+  const rows: AbsParseRow[] = [
+    {
+      id: "ocr-all",
+      label: "全部结果",
+      value: text,
+      hint: "点击复制",
+    },
+  ];
+  if (lines.length > 1) {
+    for (let i = 0; i < lines.length; i++) {
+      rows.push({
+        id: `ocr-line-${i}`,
+        label: `行 ${i + 1}`,
+        value: lines[i],
+      });
+    }
+  }
+  return rows;
+});
+
+async function runImageOcr() {
+  const item = selectedItem.value;
+  if (!item || item.kind !== "image") return;
+  ocrBusy.value = true;
+  ocrError.value = "";
+  try {
+    const text = await api.ocrHistoryImage(item.id);
+    ocrText.value = text;
+    ocrForId.value = item.id;
+    setStatus("识别完成", "ok");
+  } catch (error) {
+    ocrText.value = "";
+    ocrForId.value = item.id;
+    ocrError.value = error instanceof Error ? error.message : String(error);
+    setStatus(ocrError.value, "err");
+  } finally {
+    ocrBusy.value = false;
+  }
+}
+
 /**
  * Show recommended parse in the lower half (like abs timestamp/dict),
  * when content is short enough or absolute panel applies.
@@ -189,16 +396,24 @@ const contentFitsHalf = computed(() => {
 const showLowerParse = computed(() => {
   if (!selectedItem.value) return false;
   if (absParsePanel.value) return true;
+  if (imageOcrRows.value || (selectedItem.value.kind === "image" && (ocrBusy.value || ocrError.value))) {
+    return true;
+  }
   if (!suggestions.value.length) return false;
   return contentFitsHalf.value;
 });
 
 const lowerParseTitle = computed(() => {
+  if (imageOcrRows.value || (selectedItem.value?.kind === "image" && (ocrBusy.value || ocrError.value))) {
+    return "图片文字";
+  }
   if (absParsePanel.value) return absParsePanel.value.label;
   return "推荐解析";
 });
 
 const lowerParseHint = computed(() => {
+  if (imageOcrRows.value) return "点击复制";
+  if (selectedItem.value?.kind === "image" && ocrBusy.value) return "识别中…";
   if (absParsePanel.value) return "点击复制";
   return "单击应用 · 双击复制";
 });
@@ -275,13 +490,145 @@ const {
   dataRoot,
   hotkeyRecording,
   config,
+  isMac,
   loadConfig,
   onHotkeyKeydown,
   saveConfig,
   defaultToggleHotkey,
   defaultAppendCopyHotkey,
   defaultParseCopyHotkey,
+  defaultPasteHotkey,
 } = useSettings(setStatus);
+
+/** App version from Tauri package (tauri.conf.json / Cargo). */
+const appVersion = ref("0.1.0");
+
+/** Settings → export options */
+const exportIncludeImages = ref(true);
+const exportIncludeConfig = ref(true);
+const exportBusy = ref(false);
+
+async function pickExportDir(title: string): Promise<string | null> {
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title,
+    });
+    if (!selected || Array.isArray(selected)) return null;
+    return selected;
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), "err");
+    return null;
+  }
+}
+
+async function onExportSaved() {
+  if (exportBusy.value) return;
+  const dest = await pickExportDir("选择导出目录（收藏与钉住）");
+  if (!dest) return;
+  exportBusy.value = true;
+  try {
+    const r = await api.exportData("saved", dest, {
+      includeImages: exportIncludeImages.value,
+    });
+    setStatus(`已导出收藏/钉住 ${r.count} 条 → ${r.path}`, "ok");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), "err");
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
+async function onExportFull() {
+  if (exportBusy.value) return;
+  const dest = await pickExportDir("选择导出目录（完整库备份）");
+  if (!dest) return;
+  exportBusy.value = true;
+  try {
+    const r = await api.exportData("full", dest, {
+      includeConfig: exportIncludeConfig.value,
+    });
+    setStatus(`已导出完整库 ${r.count} 条 → ${r.path}`, "ok");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), "err");
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
+async function pickImportDir(title: string): Promise<string | null> {
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title,
+    });
+    if (!selected || Array.isArray(selected)) return null;
+    return selected;
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), "err");
+    return null;
+  }
+}
+
+async function onImportSaved() {
+  if (exportBusy.value) return;
+  const src = await pickImportDir("选择 FunCV-saved-… 导出目录");
+  if (!src) return;
+  exportBusy.value = true;
+  try {
+    const r = await api.importData("saved", src);
+    await loadHistory({ silent: true });
+    const skip =
+      r.skipped > 0 ? `，跳过 ${r.skipped}` : "";
+    setStatus(`已导入收藏/钉住 ${r.count} 条${skip}`, "ok");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), "err");
+  } finally {
+    exportBusy.value = false;
+  }
+}
+
+async function onImportFull() {
+  if (exportBusy.value) return;
+  const src = await pickImportDir("选择 FunCV-full-… 完整备份目录");
+  if (!src) return;
+
+  let ok = false;
+  try {
+    ok = await ask(
+      "导入完整库将覆盖当前全部历史记录与图片，确定继续？建议先导出备份。",
+      {
+        title: "导入完整库",
+        kind: "warning",
+        okLabel: "覆盖导入",
+        cancelLabel: "取消",
+      },
+    );
+  } catch {
+    ok = false;
+  }
+  if (!ok) {
+    setStatus("已取消导入", "muted");
+    return;
+  }
+
+  exportBusy.value = true;
+  try {
+    const r = await api.importData("full", src, {
+      includeConfig: exportIncludeConfig.value,
+    });
+    // Config may have changed; reload UI state
+    await loadConfig();
+    await loadHistory({ silent: true });
+    setStatus(`已导入完整库 · ${r.count} 条历史`, "ok");
+  } catch (error) {
+    setStatus(error instanceof Error ? error.message : String(error), "err");
+  } finally {
+    exportBusy.value = false;
+  }
+}
 
 const {
   pluginsOpen,
@@ -346,10 +693,31 @@ function onGlobalKeydown(event: KeyboardEvent) {
   }
 }
 
+const searchInputEl = ref<HTMLInputElement | null>(null);
+
+/** Focus search when main UI is shown (hotkey / tray). Skip if a drawer is open. */
+function focusSearchInput() {
+  if (settingsOpen.value || pluginsOpen.value || statsOpen.value) return;
+  if (hotkeyRecording.value) return;
+  void nextTick(() => {
+    const el = searchInputEl.value;
+    if (!el) return;
+    el.focus();
+    // Place caret at end so typing continues the query
+    const len = el.value.length;
+    try {
+      el.setSelectionRange(len, len);
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
 const unlisteners: UnlistenFn[] = [];
 
 onMounted(() => {
   window.addEventListener("keydown", onGlobalKeydown);
+  window.addEventListener("pointerdown", onGlobalPointerDown, true);
 
   // Register event listeners first and independently — never couple to data load success.
   void listen("clipboard-history-changed", () => {
@@ -387,19 +755,34 @@ onMounted(() => {
   }).then((u) => {
     unlisteners.push(u);
   });
+  void listen("focus-search", () => {
+    // Delay slightly so window focus settles (esp. macOS raise path).
+    setTimeout(() => focusSearchInput(), 30);
+  }).then((u) => {
+    unlisteners.push(u);
+  });
 
   // Yield a frame so the shell is interactive before IPC-heavy bootstrap.
   requestAnimationFrame(() => {
     void loadConfig();
+    void getVersion()
+      .then((v) => {
+        if (v) appVersion.value = v;
+      })
+      .catch(() => {
+        /* browser preview: keep package default */
+      });
     // Slight delay: list + hydrate + plugins should not compete with first drag/click.
     setTimeout(() => {
       void loadHistory();
+      focusSearchInput();
     }, 50);
   });
 });
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onGlobalKeydown);
+  window.removeEventListener("pointerdown", onGlobalPointerDown, true);
   for (const u of unlisteners) u();
   viewportRo?.disconnect();
   viewportRo = null;
@@ -418,10 +801,41 @@ onUnmounted(() => {
         </div>
       </div>
       <nav class="nav">
-        <button type="button" class="link" :disabled="loading" @click="loadHistory()">刷新</button>
         <button type="button" class="link" @click="openPlugins">插件</button>
         <button type="button" class="link" @click="openStats">统计</button>
-        <button type="button" class="link" :disabled="!items.length" @click="clearAll">清空</button>
+        <div class="clear-menu-wrap">
+          <button
+            type="button"
+            class="link"
+            :disabled="!items.length"
+            :aria-expanded="clearMenuOpen"
+            aria-haspopup="menu"
+            @click="toggleClearMenu"
+          >
+            清空
+          </button>
+          <div v-if="clearMenuOpen" class="clear-menu" role="menu">
+            <button
+              type="button"
+              class="clear-menu-item"
+              role="menuitem"
+              :disabled="clearStats.plain === 0"
+              @click="onClearMode('keep_saved')"
+            >
+              <span class="clear-menu-title">普通</span>
+              <span class="clear-menu-desc">保留钉住与收藏 · {{ clearStats.plain }} 条</span>
+            </button>
+            <button
+              type="button"
+              class="clear-menu-item danger"
+              role="menuitem"
+              @click="onClearMode('all')"
+            >
+              <span class="clear-menu-title">全部</span>
+              <span class="clear-menu-desc">含收藏 / 钉住 · {{ clearStats.all }} 条</span>
+            </button>
+          </div>
+        </div>
         <button type="button" class="link" @click="settingsOpen = true">设置</button>
       </nav>
     </header>
@@ -429,6 +843,7 @@ onUnmounted(() => {
     <div class="search-wrap">
       <div class="search-field">
         <input
+          ref="searchInputEl"
           v-model="query"
           class="search"
           :class="{ 'has-clear': !!query }"
@@ -446,30 +861,77 @@ onUnmounted(() => {
           ×
         </button>
       </div>
-      <span class="count">{{ itemCountLabel }}</span>
+      <span class="count">{{ tabCountLabel }}</span>
     </div>
 
     <div class="body">
       <section class="list" aria-label="历史">
+        <div class="hist-tabs" role="tablist" aria-label="历史分类">
+          <button
+            type="button"
+            class="hist-tab"
+            role="tab"
+            :class="{ on: histTab === 'history' }"
+            :aria-selected="histTab === 'history'"
+            @click="histTab = 'history'"
+          >
+            历史<span class="hist-tab-n">{{ histTabCounts.history }}</span>
+          </button>
+          <button
+            type="button"
+            class="hist-tab"
+            role="tab"
+            :class="{ on: histTab === 'pinned' }"
+            :aria-selected="histTab === 'pinned'"
+            @click="histTab = 'pinned'"
+          >
+            钉住<span class="hist-tab-n">{{ histTabCounts.pinned }}</span>
+          </button>
+          <button
+            type="button"
+            class="hist-tab"
+            role="tab"
+            :class="{ on: histTab === 'favorites' }"
+            :aria-selected="histTab === 'favorites'"
+            @click="histTab = 'favorites'"
+          >
+            收藏<span class="hist-tab-n">{{ histTabCounts.favorites }}</span>
+          </button>
+        </div>
         <div v-if="!hasLoaded && loading" class="empty">加载中…</div>
-        <div v-else-if="items.length === 0" class="empty">
-          <strong>暂无记录</strong>
-          <span>复制后自动出现 · 双击复制当前面板内容</span>
+        <div v-else-if="tabItems.length === 0" class="empty">
+          <template v-if="histTab === 'pinned'">
+            <strong>暂无钉住</strong>
+            <span>在内容区点图钉可钉住条目</span>
+          </template>
+          <template v-else-if="histTab === 'favorites'">
+            <strong>暂无收藏</strong>
+            <span>在内容区点星标可收藏并写备注</span>
+          </template>
+          <template v-else>
+            <strong>暂无记录</strong>
+            <span>复制后自动出现 · 双击复制当前面板内容</span>
+          </template>
         </div>
         <ul v-else>
           <li
-            v-for="item in items"
+            v-for="item in tabItems"
             :key="item.id"
-            :class="{ on: item.id === selectedItem?.id }"
+            :class="{ on: item.id === selectedItem?.id, pinned: item.pinned, favorited: item.favorited }"
             @click="selectedId = item.id"
             @dblclick="copyItem(item)"
           >
             <span class="dot" :data-k="item.kind" />
             <div class="meta">
-              <p class="preview">{{ item.preview }}</p>
+              <p class="preview">
+                <span v-if="item.pinned" class="list-mark pin" title="已钉住">⊙</span>
+                <span v-if="item.favorited" class="list-mark fav" title="已收藏">★</span>
+                {{ item.preview }}
+              </p>
+              <p v-if="item.note" class="list-note" :title="item.note">{{ item.note }}</p>
               <time>{{ formatHistoryTime(item.copiedAt) }}</time>
             </div>
-            <button type="button" class="icon-del" title="删除" @click.stop="deleteItem(item.id)">
+            <button type="button" class="icon-del" title="删除" @click.stop="deleteItem(item)">
               ×
             </button>
           </li>
@@ -537,12 +999,89 @@ onUnmounted(() => {
               :title="`识别为 ${detectedLangLabel}`"
             >{{ detectedLangLabel }}</span>
             <button
+              v-if="selectedItem.kind === 'image'"
+              type="button"
+              class="link head-action ocr-action"
+              :disabled="ocrBusy"
+              title="本地识别图片中的文字"
+              @click="runImageOcr"
+            >
+              {{ ocrBusy ? "识别中…" : "识别文字" }}
+            </button>
+            <button
               v-if="(editorDirty || !isShowingOriginal) && selectedItem.kind === 'text'"
               type="button"
               class="link head-action"
               @click="showOriginal"
             >
               恢复原文
+            </button>
+            <!-- Far right, flush to panel edge -->
+            <div class="head-icons" role="group" aria-label="钉住与收藏">
+              <button
+                type="button"
+                class="head-icon-btn"
+                :class="{ on: selectedItem.pinned }"
+                :title="selectedItem.pinned ? '取消钉住' : '钉住（列表置顶，不易被清理）'"
+                :aria-pressed="selectedItem.pinned"
+                @click="togglePinned(selectedItem)"
+              >
+                <svg class="head-icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+                  <!-- thumbtack / push-pin -->
+                  <path
+                    fill="currentColor"
+                    d="M16 4V3a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v1H7a1 1 0 1 0 0 2h.3l.9 4.3A4 4 0 0 0 7 14v1h4v6a1 1 0 1 0 2 0v-6h4v-1a4 4 0 0 0-1.2-2.7L16.7 6H17a1 1 0 1 0 0-2h-1zm-5.05 2h2.1l.85 4.1.2.9.7.6c.4.35.7.9.7 1.4H9.5c0-.5.3-1.05.7-1.4l.7-.6.2-.9L10.95 6z"
+                  />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="head-icon-btn"
+                :class="{ on: !!selectedItem.favorited }"
+                :title="selectedItem.favorited ? '取消收藏' : '收藏（可写备注并搜索）'"
+                :aria-pressed="!!selectedItem.favorited"
+                @click="onToggleFavorite"
+              >
+                <svg class="head-icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    v-if="selectedItem.favorited"
+                    fill="currentColor"
+                    d="M12 2.5l2.9 6.2 6.8.7-5.1 4.6 1.5 6.6L12 17.3 5.9 20.6l1.5-6.6L2.3 9.4l6.8-.7L12 2.5z"
+                  />
+                  <path
+                    v-else
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linejoin="round"
+                    d="M12 3.2l2.5 5.4 5.9.6-4.4 4 1.3 5.8L12 16.2 6.7 19l1.3-5.8-4.4-4 5.9-.6L12 3.2z"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Favorite note: under title bar; searchable from top search -->
+          <div v-if="selectedItem.favorited" class="note-bar">
+            <span class="note-label">备注</span>
+            <input
+              :key="`note-${selectedItem.id}-${noteFocusToken}`"
+              ref="noteInputEl"
+              v-model="noteDraft"
+              class="note-input"
+              type="text"
+              maxlength="200"
+              placeholder="给收藏写备注，可在上方搜索…"
+              spellcheck="false"
+              @keydown.enter.prevent="onSaveNote"
+            />
+            <button
+              type="button"
+              class="link note-save"
+              :disabled="noteSaving || noteDraft.trim() === (selectedItem.note || '').trim()"
+              @click="onSaveNote"
+            >
+              {{ noteSaving ? "…" : "保存" }}
             </button>
           </div>
 
@@ -580,14 +1119,37 @@ onUnmounted(() => {
               <p class="muted">无内容</p>
             </div>
 
-            <!-- Lower half: absolute rows or general recommendations -->
+            <!-- Lower half: OCR / absolute rows / general recommendations -->
             <div v-if="showLowerParse" class="abs-parse-pane" role="list" aria-label="解析结果">
               <div class="abs-parse-pane-head">
                 <span>{{ lowerParseTitle }}</span>
                 <span class="abs-parse-pane-hint">{{ lowerParseHint }}</span>
               </div>
               <div class="abs-parse-stack">
-                <template v-if="absParsePanel">
+                <template v-if="selectedItem.kind === 'image' && ocrBusy">
+                  <p class="ocr-status muted">正在本地识别文字…</p>
+                </template>
+                <template v-else-if="selectedItem.kind === 'image' && ocrError && !imageOcrRows">
+                  <p class="ocr-status ocr-err">{{ ocrError }}</p>
+                </template>
+                <template v-else-if="imageOcrRows">
+                  <button
+                    v-for="row in imageOcrRows"
+                    :key="row.id"
+                    type="button"
+                    class="abs-parse-row"
+                    role="listitem"
+                    :title="`复制 ${row.label}`"
+                    @click="copyAbsParseRow(row.value, row.label)"
+                  >
+                    <span class="abs-parse-label">
+                      {{ row.label }}
+                      <em v-if="row.hint">{{ row.hint }}</em>
+                    </span>
+                    <span class="abs-parse-value">{{ row.value }}</span>
+                  </button>
+                </template>
+                <template v-else-if="absParsePanel">
                   <button
                     v-for="row in absParsePanel.rows"
                     :key="row.id"
@@ -739,7 +1301,7 @@ onUnmounted(() => {
     <div v-if="settingsOpen" class="scrim" @click.self="settingsOpen = false">
       <aside class="drawer" @click.stop>
         <header>
-          <h2>设置</h2>
+          <h2>设置 <span class="settings-ver">v{{ appVersion }}</span></h2>
           <button type="button" class="link icon" @click="settingsOpen = false">×</button>
         </header>
         <label>
@@ -750,6 +1312,18 @@ onUnmounted(() => {
           轮询间隔 (ms)
           <input v-model.number="config.pollIntervalMs" type="number" min="150" max="5000" step="50" />
         </label>
+        <div class="watch-types">
+          <span class="watch-types-label">监听类型</span>
+          <label class="check-row">
+            <input v-model="config.watchText" type="checkbox" />
+            <span>文本</span>
+          </label>
+          <label class="check-row">
+            <input v-model="config.watchImage" type="checkbox" />
+            <span>图片</span>
+          </label>
+        </div>
+        <p class="tip">仅勾选的类型会写入历史；默认文本 + 图片都监听。至少保留一项。</p>
         <label class="hotkey-field">
           唤起 / 隐藏快捷键
           <input
@@ -803,12 +1377,104 @@ onUnmounted(() => {
             @keydown="onHotkeyKeydown($event, 'parse')"
           />
         </label>
+        <label class="hotkey-field">
+          快速粘贴快捷键
+          <input
+            class="hotkey-input"
+            :class="{ recording: hotkeyRecording === 'paste' }"
+            type="text"
+            readonly
+            :value="
+              hotkeyRecording === 'paste'
+                ? '按下组合键…（Delete 清空）'
+                : config.pasteHotkey || '未设置（已关闭）'
+            "
+            :placeholder="defaultPasteHotkey()"
+            @focus="hotkeyRecording = 'paste'"
+            @click="hotkeyRecording = 'paste'"
+            @blur="hotkeyRecording = null"
+            @keydown="onHotkeyKeydown($event, 'paste')"
+          />
+        </label>
         <p class="tip">
-          <strong>复制并解析</strong>：在任意应用选中文本后按快捷键 → 自动复制并弹出 FunCV 解析（默认
-          Shift+Option+X）。<br />
-          <strong>追加复制</strong>：剪贴板已是文本时，把选中内容用双空格接在后面；重复追加同一段只生效一次。macOS
-          需在「辅助功能」中允许 FunCV。
+          <template v-if="isMac">
+            <strong>快速粘贴</strong>：在任意应用按快捷键（默认 Cmd+F2）→ 在光标旁弹出精简列表（最近 50
+            条，可滚动），⌘1–9 或点击即粘贴到原光标处；「查看更多」才打开主界面。<br />
+            <strong>复制并解析</strong>：在任意应用选中文本后按快捷键 → 自动复制并弹出 FunCV
+            解析（默认 Shift+Option+X）。<br />
+            <strong>追加复制</strong>：剪贴板已是文本时，把选中内容用双空格接在后面；重复追加同一段只生效一次。需在「系统设置
+            → 隐私与安全性 → 辅助功能」中允许 FunCV。
+          </template>
+          <template v-else>
+            <strong>快速粘贴</strong>：在任意应用按快捷键（默认 Ctrl+F2）→ 在光标旁弹出精简列表（最近 50
+            条，可滚动），Ctrl+1–9 或点击即粘贴到原光标处；「查看更多」才打开主界面。<br />
+            <strong>复制并解析</strong>：在任意应用选中文本后按快捷键 → 自动复制并弹出 FunCV
+            解析（默认 Shift+Alt+X）。<br />
+            <strong>追加复制</strong>：剪贴板已是文本时，把选中内容用双空格接在后面；重复追加同一段只生效一次。若模拟按键失败，请检查系统是否拦截后台注入。
+          </template>
         </p>
+
+        <div class="export-box">
+          <div class="export-head">
+            <strong>数据导出 / 导入</strong>
+          </div>
+          <div class="watch-types export-opts">
+            <label class="check-row">
+              <input v-model="exportIncludeImages" type="checkbox" />
+              <span>收藏导出含图片</span>
+            </label>
+            <label class="check-row">
+              <input v-model="exportIncludeConfig" type="checkbox" />
+              <span>完整导出/导入含配置</span>
+            </label>
+          </div>
+          <div class="export-actions">
+            <button
+              type="button"
+              class="link export-btn"
+              :disabled="exportBusy"
+              title="导出 JSON + 可选图片，便于备份收藏"
+              @click="onExportSaved"
+            >
+              导出收藏和钉住
+            </button>
+            <button
+              type="button"
+              class="primary export-btn"
+              :disabled="exportBusy"
+              title="复制 history.db 与 images，便于整库迁移"
+              @click="onExportFull"
+            >
+              导出全部
+            </button>
+          </div>
+          <div class="export-actions">
+            <button
+              type="button"
+              class="link export-btn"
+              :disabled="exportBusy"
+              title="选择 FunCV-saved-… 目录，合并收藏与钉住"
+              @click="onImportSaved"
+            >
+              导入收藏和钉住
+            </button>
+            <button
+              type="button"
+              class="link export-btn danger-text"
+              :disabled="exportBusy"
+              title="选择 FunCV-full-… 目录，覆盖当前库"
+              @click="onImportFull"
+            >
+              导入全部
+            </button>
+          </div>
+          <p class="tip">
+            <strong>收藏和钉住</strong>：导出/导入 <code>export.json</code> + 可选
+            <code>images/</code>；导入按内容合并（同 hash 合并钉住/收藏/备注）。<br />
+            <strong>全部</strong>：导出复制库文件；导入将<strong>覆盖</strong>当前历史与图片，请先备份。
+          </p>
+        </div>
+
         <div class="drawer-actions">
           <button type="button" class="link" @click="settingsOpen = false">取消</button>
           <button type="button" class="primary" @click="saveConfig">保存</button>
@@ -1056,6 +1722,71 @@ onUnmounted(() => {
   gap: 2px;
   -webkit-app-region: no-drag;
   app-region: no-drag;
+}
+
+.clear-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.clear-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 200px;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #151b22;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  display: grid;
+  gap: 2px;
+}
+
+.clear-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.clear-menu-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.clear-menu-item:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.clear-menu-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.clear-menu-desc {
+  font-size: 0.68rem;
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.clear-menu-item.danger .clear-menu-title {
+  color: #f0b4b4;
+}
+
+.clear-menu-item.danger:hover:not(:disabled) {
+  background: rgba(180, 70, 70, 0.14);
 }
 
 .search-wrap,
@@ -1457,11 +2188,75 @@ button.primary {
   flex-direction: column;
 }
 
+/* Shared panel header height (tabs ↔ content title stay aligned) */
+/* hist-tabs + detail-head both 36px */
+
+/* Compact history tabs — pin/fav no longer bury the main feed */
+.hist-tabs {
+  flex: 0 0 36px;
+  height: 36px;
+  min-height: 36px;
+  max-height: 36px;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
+  box-sizing: border-box;
+}
+
+.hist-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  height: 26px;
+  margin: 0;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 680;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.hist-tab:hover {
+  color: #dce4eb;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.hist-tab.on {
+  color: #042019;
+  background: var(--accent);
+  font-weight: 740;
+}
+
+.hist-tab-n {
+  font-size: 0.64rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+  min-width: 0.9em;
+  text-align: center;
+}
+
+.hist-tab.on .hist-tab-n {
+  opacity: 0.85;
+}
+
 .list ul {
   list-style: none;
   margin: 0;
   padding: 6px;
-  height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -1563,30 +2358,161 @@ time {
 }
 
 .detail-head {
-  flex: 0 0 40px;
-  height: 40px;
-  min-height: 40px;
-  max-height: 40px;
+  /* Match .hist-tabs row height (36px) for horizontal align with left panel */
+  flex: 0 0 36px;
+  height: 36px;
+  min-height: 36px;
+  max-height: 36px;
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
-  gap: 8px;
-  padding: 0 14px;
+  gap: 6px;
+  padding: 0 6px 0 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
   overflow: hidden;
   box-sizing: border-box;
 }
 
-/* Primary title: 内容 / 预览 */
+/* Primary title: 内容 / 预览 — same scale as hist-tab labels */
 .head-title {
-  font-size: 0.92rem;
-  font-weight: 760;
+  font-size: 0.78rem;
+  font-weight: 740;
   letter-spacing: 0.04em;
   color: #f2f6fa;
   line-height: 1;
   flex-shrink: 0;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+}
+
+/* Pin / favorite — always far right, flush to edge */
+.head-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  flex-shrink: 0;
+  margin-left: auto;
+  margin-right: 0;
+}
+
+.head-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #8a969f;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease, opacity 0.12s ease;
+}
+
+.head-icon-btn:hover {
+  color: #e8edf2;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.head-icon-btn.on {
+  color: var(--accent);
+  background: transparent;
+}
+
+.head-icon-btn.on:hover {
+  color: #7aebc8;
+  background: rgba(62, 207, 173, 0.1);
+}
+
+.head-icon-svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.list-mark {
+  display: inline-block;
+  margin-right: 4px;
+  font-size: 0.72rem;
+  vertical-align: baseline;
+  opacity: 0.95;
+}
+
+.list-mark.fav {
+  color: #f0c45a;
+}
+
+.list li.pinned .preview {
+  font-weight: 650;
+}
+
+.list-note {
+  margin: 0 0 2px;
+  font-size: 0.68rem;
+  line-height: 1.3;
+  color: #f0c45a;
+  opacity: 0.92;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 12px 6px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(240, 196, 90, 0.06);
+  box-sizing: border-box;
+}
+
+.note-label {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-weight: 740;
+  color: #f0c45a;
+  letter-spacing: 0.04em;
+}
+
+.note-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  border: 1px solid rgba(240, 196, 90, 0.28);
+  border-radius: 8px;
+  background: #0b1014;
+  color: #e8edf2;
+  font: inherit;
+  font-size: 0.8rem;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.note-input::placeholder {
+  color: #7a8792;
+  opacity: 0.85;
+}
+
+.note-input:focus {
+  border-color: rgba(240, 196, 90, 0.55);
+  box-shadow: 0 0 0 2px rgba(240, 196, 90, 0.12);
+}
+
+.note-save {
+  flex-shrink: 0;
+  font-size: 0.72rem !important;
+  font-weight: 720;
+  color: #f0c45a !important;
+  padding: 4px 8px !important;
+}
+
+.note-save:disabled {
+  opacity: 0.35;
 }
 
 /* Shared badge for 原文 / 解析 / 汉→英 / JSON … */
@@ -1594,15 +2520,15 @@ time {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  max-width: 9em;
+  max-width: 8em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.72rem;
+  font-size: 0.66rem;
   font-weight: 740;
-  line-height: 1.15;
-  letter-spacing: 0.03em;
-  padding: 4px 9px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  padding: 3px 8px;
   border-radius: 999px;
   border: 1px solid transparent;
   box-sizing: border-box;
@@ -1680,15 +2606,16 @@ time {
 }
 
 .head-action {
-  margin-left: auto;
+  /* stay with tags; pin/fav use margin-left:auto on .head-icons */
+  margin-left: 0;
   flex-shrink: 0;
   min-height: 0 !important;
-  height: auto;
-  padding: 4px 10px !important;
+  height: 24px !important;
+  padding: 0 9px !important;
   border-radius: 999px;
-  font-size: 0.72rem;
+  font-size: 0.66rem;
   font-weight: 720;
-  line-height: 1.15;
+  line-height: 1;
   color: #c5d0d8 !important;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.04);
@@ -1698,6 +2625,27 @@ time {
   color: #f2f6fa !important;
   border-color: rgba(62, 207, 173, 0.4);
   background: rgba(62, 207, 173, 0.1);
+}
+
+.head-action.ocr-action {
+  color: #b8f5e4 !important;
+  border-color: rgba(62, 207, 173, 0.45);
+  background: rgba(62, 207, 173, 0.12);
+  font-weight: 740;
+}
+
+.head-action.ocr-action:disabled {
+  opacity: 0.55;
+}
+
+.ocr-status {
+  margin: 4px 2px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.ocr-status.ocr-err {
+  color: #f0b4b4;
 }
 
 .viewport {
@@ -1912,6 +2860,54 @@ time {
   opacity: 0.75;
 }
 
+.settings-ver {
+  margin-left: 8px;
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: var(--muted);
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+}
+
+.export-box {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.export-head {
+  font-size: 0.84rem;
+  color: #e8edf2;
+}
+
+.export-opts {
+  padding: 0;
+}
+
+.export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.export-btn {
+  flex: 1 1 auto;
+  min-width: 7.5rem;
+  justify-content: center;
+}
+
+.export-box .tip code {
+  font-size: 0.7rem;
+  color: var(--accent);
+}
+
+.export-btn.danger-text {
+  color: #f0b4b4 !important;
+}
+
 .scrim {
   position: absolute;
   inset: 0;
@@ -1972,6 +2968,44 @@ time {
   padding: 0 10px;
   color: var(--text);
   background: #0b1014;
+}
+
+.watch-types {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  padding: 4px 0;
+}
+
+.watch-types-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #c5d0d8;
+  margin-right: 4px;
+}
+
+.check-row {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 8px;
+  grid-template-columns: none !important;
+  color: #e8edf2 !important;
+  font-size: 0.84rem !important;
+  font-weight: 650;
+  cursor: pointer;
+  user-select: none;
+}
+
+.check-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border-radius: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
 .hotkey-input {

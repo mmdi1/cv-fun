@@ -17,7 +17,12 @@ pub struct ClipboardWatcher {
 }
 
 impl ClipboardWatcher {
-    pub fn start(app: AppHandle, interval_ms: u64) -> Self {
+    pub fn start(
+        app: AppHandle,
+        interval_ms: u64,
+        watch_text: Arc<AtomicBool>,
+        watch_image: Arc<AtomicBool>,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
         let interval = Duration::from_millis(interval_ms.max(150));
@@ -43,25 +48,38 @@ impl ClipboardWatcher {
 
             // Fallback platforms without changeCount: only hash text (skip get_image on prime).
             if !primed {
-                if let Ok(text) = clipboard.get_text() {
-                    let t = text.trim();
-                    if !t.is_empty() {
-                        let mut hasher = Sha256::new();
-                        hasher.update(b"text:");
-                        hasher.update(t.as_bytes());
-                        last_content_sig = Some(format!("txt:{}", hex::encode(hasher.finalize())));
+                if watch_text.load(Ordering::SeqCst) {
+                    if let Ok(text) = clipboard.get_text() {
+                        let t = text.trim();
+                        if !t.is_empty() {
+                            let mut hasher = Sha256::new();
+                            hasher.update(b"text:");
+                            hasher.update(t.as_bytes());
+                            last_content_sig =
+                                Some(format!("txt:{}", hex::encode(hasher.finalize())));
+                        }
                     }
                 }
                 primed = true;
             }
 
             eprintln!(
-                "[nfun-cv] clipboard watcher ready (changeCount={:?}, interval={}ms)",
+                "[nfun-cv] clipboard watcher ready (changeCount={:?}, interval={}ms, text={} image={})",
                 last_change,
-                interval.as_millis()
+                interval.as_millis(),
+                watch_text.load(Ordering::SeqCst),
+                watch_image.load(Ordering::SeqCst),
             );
 
             while !stop_flag.load(Ordering::SeqCst) {
+                let wt = watch_text.load(Ordering::SeqCst);
+                let wi = watch_image.load(Ordering::SeqCst);
+                // Both off should not happen (sanitize forces text); skip work if so.
+                if !wt && !wi {
+                    thread::sleep(interval);
+                    continue;
+                }
+
                 // --- Cheap path: generation counter (macOS) ---
                 if let Some(count) = pasteboard_change_count() {
                     if last_change == Some(count) {
@@ -77,7 +95,7 @@ impl ClipboardWatcher {
                         continue;
                     }
 
-                    match read_snapshot(&mut clipboard) {
+                    match read_snapshot(&mut clipboard, wt, wi) {
                         Ok(Some(snapshot)) => {
                             // Deduplicate identical content even if changeCount moved
                             // (e.g. app re-wrote the same text).
@@ -106,7 +124,7 @@ impl ClipboardWatcher {
                 }
 
                 // --- Fallback: content fingerprint every poll ---
-                match read_snapshot(&mut clipboard) {
+                match read_snapshot(&mut clipboard, wt, wi) {
                     Ok(Some(snapshot)) => {
                         if last_content_sig.as_ref() != Some(&snapshot.signature) {
                             let sig = snapshot.signature.clone();
@@ -173,23 +191,32 @@ fn pasteboard_change_count() -> Option<i64> {
     None
 }
 
-fn read_snapshot(clipboard: &mut Clipboard) -> Result<Option<Snapshot>, String> {
-    // Text first — cheap, and preferred when both text and image are present.
-    let text = match clipboard.get_text() {
-        Ok(t) => {
-            let t = t.trim().to_string();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
+fn read_snapshot(
+    clipboard: &mut Clipboard,
+    watch_text: bool,
+    watch_image: bool,
+) -> Result<Option<Snapshot>, String> {
+    // Text first when enabled — cheap, and preferred when both text and image are present.
+    let text = if watch_text {
+        match clipboard.get_text() {
+            Ok(t) => {
+                let t = t.trim().to_string();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t)
+                }
             }
+            Err(_) => None,
         }
-        Err(_) => None,
+    } else {
+        None
     };
 
-    // Only decode image when there is no text. Calling get_image on every poll
-    // with a large screenshot on the pasteboard freezes the watcher for seconds.
-    let image = if text.is_none() {
+    // Only decode image when watching images. If text is also watched and present,
+    // skip image (same preference as before). When text watching is off, read image
+    // even if pasteboard also has text.
+    let image = if watch_image && (text.is_none() || !watch_text) {
         match clipboard.get_image() {
             Ok(img) => {
                 let bytes = img.bytes.into_owned();
@@ -208,6 +235,10 @@ fn read_snapshot(clipboard: &mut Clipboard) -> Result<Option<Snapshot>, String> 
     } else {
         None
     };
+
+    // Drop types that are not enabled (defensive)
+    let text = if watch_text { text } else { None };
+    let image = if watch_image { image } else { None };
 
     if text.is_none() && image.is_none() {
         return Ok(None);

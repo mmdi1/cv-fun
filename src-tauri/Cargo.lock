@@ -2334,6 +2334,7 @@ name = "nfun-cv"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "cc",
  "chrono",
  "csv",
  "dirs",

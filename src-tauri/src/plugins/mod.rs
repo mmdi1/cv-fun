@@ -17,6 +17,7 @@
 
 mod ecdict;
 mod manifest;
+mod ocr_plugin;
 mod registry;
 mod runner;
 mod samples;

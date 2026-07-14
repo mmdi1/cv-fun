@@ -26,6 +26,13 @@ export function defaultParseCopyHotkey(
   return platform === "mac" ? "Shift+Option+X" : "Shift+Alt+X";
 }
 
+/** Default quick-paste popup shortcut. */
+export function defaultPasteHotkey(
+  platform: ShortcutPlatform = detectShortcutPlatform(),
+): string {
+  return platform === "mac" ? "Cmd+F2" : "Ctrl+F2";
+}
+
 function keyFromEvent(
   event: Pick<KeyboardEvent, "key"> & Partial<Pick<KeyboardEvent, "code">>,
 ) {
@@ -43,8 +50,10 @@ function keyFromEvent(
   if (code === "Equal") return "=";
   if (/^Key[A-Z]$/.test(code)) return code.slice(3);
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (/^F\d{1,2}$/.test(code)) return code;
   if (code.startsWith("Arrow")) return code.replace("Arrow", "");
   if (event.key === " ") return "Space";
+  if (/^F\d{1,2}$/i.test(event.key)) return event.key.toUpperCase();
   return event.key.length === 1 ? event.key.toUpperCase() : event.key;
 }
 

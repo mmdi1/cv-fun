@@ -4,11 +4,13 @@ use crate::config::{
     AppConfig,
 };
 use crate::history::{HistoryItem, HistoryStore, ItemKind};
+use crate::paste_popup;
 use arboard::{Clipboard, ImageData};
 use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -16,6 +18,9 @@ pub struct AppState {
     pub store: Mutex<HistoryStore>,
     pub data_root: PathBuf,
     pub registered_hotkeys: StdMutex<Vec<String>>,
+    /// Live flags for clipboard watcher (updated on save without restart).
+    pub watch_text: Arc<AtomicBool>,
+    pub watch_image: Arc<AtomicBool>,
 }
 
 fn map_err(err: impl ToString) -> String {
@@ -32,9 +37,43 @@ pub fn delete_history(state: State<'_, AppState>, id: String) -> Result<(), Stri
     state.store.lock().delete(&id).map_err(map_err)
 }
 
+/// Clear history. `mode`: `keep_saved` | `keep_favorites` | `all`
 #[tauri::command]
-pub fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
-    state.store.lock().clear().map_err(map_err)
+pub fn clear_history(state: State<'_, AppState>, mode: Option<String>) -> Result<u32, String> {
+    let mode = mode.unwrap_or_else(|| "all".into());
+    let n = state.store.lock().clear(&mode).map_err(map_err)?;
+    Ok(n as u32)
+}
+
+#[tauri::command]
+pub fn set_history_pinned(
+    state: State<'_, AppState>,
+    id: String,
+    pinned: bool,
+) -> Result<HistoryItem, String> {
+    state.store.lock().set_pinned(&id, pinned).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn set_history_favorited(
+    state: State<'_, AppState>,
+    id: String,
+    favorited: bool,
+) -> Result<HistoryItem, String> {
+    state
+        .store
+        .lock()
+        .set_favorited(&id, favorited)
+        .map_err(map_err)
+}
+
+#[tauri::command]
+pub fn set_history_note(
+    state: State<'_, AppState>,
+    id: String,
+    note: String,
+) -> Result<HistoryItem, String> {
+    state.store.lock().set_note(&id, &note).map_err(map_err)
 }
 
 #[tauri::command]
@@ -103,6 +142,22 @@ pub fn resolve_image_path(state: State<'_, AppState>, id: String) -> Result<Stri
     Ok(abs.to_string_lossy().into_owned())
 }
 
+/// Local OCR for a history image item. macOS Vision / Windows Media.Ocr.
+#[tauri::command]
+pub fn ocr_history_image(state: State<'_, AppState>, id: String) -> Result<String, String> {
+    let store = state.store.lock();
+    let item = store.get(&id).map_err(map_err)?;
+    if item.kind != ItemKind::Image {
+        return Err("仅支持图片记录".into());
+    }
+    let rel = item
+        .image_path
+        .ok_or_else(|| "图片路径缺失".to_string())?;
+    let abs = store.root().join(rel);
+    drop(store);
+    crate::ocr::ocr_image_file(&abs)
+}
+
 #[tauri::command]
 pub fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String> {
     load_config(&state.data_root).map_err(map_err)
@@ -128,6 +183,7 @@ pub fn save_app_config(
     let _ = to_global_hotkey(&config.toggle_hotkey).map_err(map_err)?;
     config.append_copy_hotkey = config.append_copy_hotkey.trim().to_string();
     config.parse_copy_hotkey = config.parse_copy_hotkey.trim().to_string();
+    config.paste_hotkey = config.paste_hotkey.trim().to_string();
 
     if !config.append_copy_hotkey.is_empty() {
         let _ = to_append_copy_hotkey(&config.append_copy_hotkey).map_err(map_err)?;
@@ -148,15 +204,39 @@ pub fn save_app_config(
             return Err("复制并解析快捷键不能与追加复制快捷键相同".into());
         }
     }
+    if !config.paste_hotkey.is_empty() {
+        let _ = to_global_hotkey(&config.paste_hotkey).map_err(map_err)?;
+        let paste = config.paste_hotkey.trim();
+        if paste.eq_ignore_ascii_case(config.toggle_hotkey.trim()) {
+            return Err("快速粘贴快捷键不能与唤起/隐藏快捷键相同".into());
+        }
+        if !config.append_copy_hotkey.is_empty()
+            && paste.eq_ignore_ascii_case(config.append_copy_hotkey.trim())
+        {
+            return Err("快速粘贴快捷键不能与追加复制快捷键相同".into());
+        }
+        if !config.parse_copy_hotkey.is_empty()
+            && paste.eq_ignore_ascii_case(config.parse_copy_hotkey.trim())
+        {
+            return Err("快速粘贴快捷键不能与复制并解析快捷键相同".into());
+        }
+    }
 
     save_config(&state.data_root, &config).map_err(map_err)?;
     state.store.lock().set_max_items(config.history.max_items);
+    state
+        .watch_text
+        .store(config.watch_text, Ordering::SeqCst);
+    state
+        .watch_image
+        .store(config.watch_image, Ordering::SeqCst);
     register_app_hotkeys(
         &app,
         &state,
         &config.toggle_hotkey,
         &config.append_copy_hotkey,
         &config.parse_copy_hotkey,
+        &config.paste_hotkey,
     )?;
     Ok(config)
 }
@@ -179,13 +259,14 @@ pub fn toggle_main_window(app: &AppHandle) {
     }
 }
 
-/// Register toggle + optional append-copy + parse-copy global shortcuts.
+/// Register toggle + optional append-copy / parse-copy / quick-paste global shortcuts.
 pub fn register_app_hotkeys(
     app: &AppHandle,
     state: &AppState,
     toggle_display: &str,
     append_display: &str,
     parse_display: &str,
+    paste_display: &str,
 ) -> Result<(), String> {
     let _ = app.global_shortcut().unregister_all();
     if let Ok(mut registered) = state.registered_hotkeys.lock() {
@@ -308,6 +389,64 @@ pub fn register_app_hotkeys(
         }
     }
 
+    // Quick paste popup at cursor (optional)
+    let paste = paste_display.trim();
+    if !paste.is_empty() {
+        let hotkey = to_global_hotkey(paste).map_err(map_err)?;
+        let shortcut: Shortcut = hotkey
+            .parse()
+            .map_err(|e| format!("无效快速粘贴快捷键 {paste} ({hotkey}): {e}"))?;
+        let app_handle = app.clone();
+        app.global_shortcut()
+            .on_shortcut(shortcut, move |_app, _shortcut, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                // Remember frontmost app *before* FunCV steals focus.
+                paste_popup::capture_previous_app();
+                paste_popup::show_paste_popup(&app_handle);
+            })
+            .map_err(map_err)?;
+        if let Ok(mut registered) = state.registered_hotkeys.lock() {
+            registered.push(hotkey);
+        }
+    }
+
+    Ok(())
+}
+
+/// Recent history for the paste popup (max 12).
+#[tauri::command]
+pub fn list_paste_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<HistoryItem>, String> {
+    let items = paste_popup::list_for_paste(&state)?;
+    paste_popup::resize_paste_window(&app, items.len());
+    Ok(items)
+}
+
+#[tauri::command]
+pub fn hide_paste_popup(app: AppHandle) -> Result<(), String> {
+    paste_popup::hide_paste_popup(&app);
+    Ok(())
+}
+
+/// Copy history item and simulate paste into the previously focused app.
+#[tauri::command]
+pub fn paste_history_item(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    paste_popup::paste_history_item(&app, &state, &id)
+}
+
+/// "查看更多" — open main UI from the paste popup.
+#[tauri::command]
+pub fn open_main_from_paste(app: AppHandle) -> Result<(), String> {
+    paste_popup::hide_paste_popup(&app);
+    crate::show_main(&app);
     Ok(())
 }
 
@@ -315,6 +454,135 @@ pub fn register_app_hotkeys(
 #[tauri::command]
 pub fn data_root_path(state: State<'_, AppState>) -> Result<String, String> {
     Ok(state.data_root.to_string_lossy().into_owned())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResult {
+    pub path: String,
+    pub count: u32,
+    pub mode: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub mode: String,
+    pub path: String,
+    /// saved: newly merged/inserted; full: total rows after restore
+    pub count: u32,
+    /// saved only: skipped rows
+    pub skipped: u32,
+}
+
+/// Export data. `mode`: `saved` | `full`.
+/// - saved: pinned/favorited → export.json (+ images if include_images)
+/// - full: copy history.db + images (+ config if include_config)
+#[tauri::command]
+pub fn export_data(
+    state: State<'_, AppState>,
+    mode: String,
+    dest_dir: String,
+    include_images: Option<bool>,
+    include_config: Option<bool>,
+) -> Result<ExportResult, String> {
+    let dest = PathBuf::from(dest_dir.trim());
+    if dest_dir.trim().is_empty() || !dest.is_dir() {
+        return Err("请选择有效的导出目录".into());
+    }
+    let store = state.store.lock();
+    let mode = mode.trim().to_ascii_lowercase();
+    let (path, count) = match mode.as_str() {
+        "saved" | "favorites" | "pinned" => store
+            .export_saved(&dest, include_images.unwrap_or(true))
+            .map_err(map_err)?,
+        "full" | "all" => store
+            .export_full(&dest, include_config.unwrap_or(true))
+            .map_err(map_err)?,
+        other => return Err(format!("未知导出模式: {other}")),
+    };
+    Ok(ExportResult {
+        path: path.to_string_lossy().into_owned(),
+        count: count as u32,
+        mode,
+    })
+}
+
+/// Import data. `mode`: `saved` | `full` | `auto` (detect from folder).
+/// `source_path`: FunCV-saved-* or FunCV-full-* directory (or export.json for saved).
+#[tauri::command]
+pub fn import_data(
+    state: State<'_, AppState>,
+    mode: String,
+    source_path: String,
+    include_config: Option<bool>,
+) -> Result<ImportResult, String> {
+    let src = PathBuf::from(source_path.trim());
+    if source_path.trim().is_empty() || (!src.is_dir() && !src.is_file()) {
+        return Err("请选择有效的导入路径".into());
+    }
+
+    let mode = mode.trim().to_ascii_lowercase();
+    let detected = if mode == "auto" || mode.is_empty() {
+        if src.join("history.db").is_file()
+            || (src.is_file()
+                && src
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s == "history.db")
+                    .unwrap_or(false))
+        {
+            "full"
+        } else if src.join("export.json").is_file()
+            || (src.is_file()
+                && src
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("export.json"))
+                    .unwrap_or(false))
+        {
+            "saved"
+        } else {
+            return Err(
+                "无法识别包类型：需要 export.json（收藏）或 history.db（完整库）".into(),
+            );
+        }
+    } else {
+        mode.as_str()
+    };
+
+    let package = if src.is_file() {
+        src.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    } else {
+        src.clone()
+    };
+
+    let store = state.store.lock();
+    match detected {
+        "saved" | "favorites" => {
+            let (count, skipped) = store.import_saved(&package).map_err(map_err)?;
+            Ok(ImportResult {
+                mode: "saved".into(),
+                path: package.to_string_lossy().into_owned(),
+                count: count as u32,
+                skipped: skipped as u32,
+            })
+        }
+        "full" | "all" => {
+            let count = store
+                .import_full(&package, include_config.unwrap_or(true))
+                .map_err(map_err)?;
+            Ok(ImportResult {
+                mode: "full".into(),
+                path: package.to_string_lossy().into_owned(),
+                count: count as u32,
+                skipped: 0,
+            })
+        }
+        other => Err(format!("未知导入模式: {other}")),
+    }
 }
 
 #[tauri::command]

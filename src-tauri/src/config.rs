@@ -21,6 +21,19 @@ pub struct AppConfig {
     /// Empty string = disabled. e.g. "Shift+Option+X"
     #[serde(default = "default_parse_copy_hotkey")]
     pub parse_copy_hotkey: String,
+    /// Quick paste popup at cursor. Empty = disabled. e.g. "Cmd+F2"
+    #[serde(default = "default_paste_hotkey")]
+    pub paste_hotkey: String,
+    /// Capture text clipboard changes into history (default true).
+    #[serde(default = "default_true")]
+    pub watch_text: bool,
+    /// Capture image clipboard changes into history (default true).
+    #[serde(default = "default_true")]
+    pub watch_image: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +66,14 @@ fn default_parse_copy_hotkey() -> String {
     }
 }
 
+fn default_paste_hotkey() -> String {
+    if cfg!(target_os = "macos") {
+        "Cmd+F2".into()
+    } else {
+        "Ctrl+F2".into()
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -61,6 +82,9 @@ impl Default for AppConfig {
             toggle_hotkey: default_toggle_hotkey(),
             append_copy_hotkey: default_append_copy_hotkey(),
             parse_copy_hotkey: default_parse_copy_hotkey(),
+            paste_hotkey: default_paste_hotkey(),
+            watch_text: true,
+            watch_image: true,
         }
     }
 }
@@ -107,6 +131,11 @@ fn sanitize_config(config: &mut AppConfig) {
     }
     config.append_copy_hotkey = config.append_copy_hotkey.trim().to_string();
     config.parse_copy_hotkey = config.parse_copy_hotkey.trim().to_string();
+    config.paste_hotkey = config.paste_hotkey.trim().to_string();
+    // If both off, force text on so the app is never fully deaf
+    if !config.watch_text && !config.watch_image {
+        config.watch_text = true;
+    }
 }
 
 /// Convert UI display shortcut (Option+Space / Ctrl+Shift+V) into global-hotkey format.

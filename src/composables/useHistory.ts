@@ -1,5 +1,6 @@
 import { computed, ref, watch } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { ask } from "@tauri-apps/plugin-dialog";
 import * as api from "../api";
 import type { HistoryItem, PanelContent, ParseSuggestion } from "../core/types";
 import { resolveContent } from "../extensions";
@@ -366,13 +367,95 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     }
   }
 
-  async function deleteItem(id: string) {
+  async function deleteItem(target: string | HistoryItem) {
+    const id = typeof target === "string" ? target : target.id;
+    const item =
+      typeof target === "string"
+        ? items.value.find((i) => i.id === id)
+        : target;
+    // Favorites: require confirm to avoid mis-click on ×
+    // window.confirm is often blocked/silent in Tauri webviews — use plugin-dialog.
+    if (item && !!item.favorited) {
+      const note = item.note?.trim();
+      const label = note || item.preview || "该收藏";
+      const short =
+        label.length > 48 ? `${[...label].slice(0, 48).join("")}…` : label;
+      let ok = false;
+      try {
+        ok = await ask(`「${short}」已收藏，确定删除？删除后无法恢复。`, {
+          title: "删除收藏",
+          kind: "warning",
+          okLabel: "删除",
+          cancelLabel: "取消",
+        });
+      } catch (err) {
+        console.warn("[nfun-cv] dialog.ask failed", err);
+        ok = false;
+      }
+      if (!ok) {
+        setStatus("已取消删除", "muted");
+        return;
+      }
+    }
     try {
       await api.deleteHistory(id);
       await loadHistory({ silent: true });
       setStatus("已删除", "ok");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error), "err");
+    }
+  }
+
+  function patchItem(updated: HistoryItem) {
+    const idx = items.value.findIndex((i) => i.id === updated.id);
+    if (idx >= 0) {
+      const prev = items.value[idx]!;
+      // Keep hydrated text body if list payload omits it
+      items.value[idx] = {
+        ...updated,
+        text: updated.text ?? prev.text,
+      };
+    }
+    // Time order only — pin/fav live in their own list tabs
+    items.value = [...items.value].sort((a, b) =>
+      String(b.copiedAt).localeCompare(String(a.copiedAt)),
+    );
+  }
+
+  async function togglePinned(item: HistoryItem) {
+    try {
+      const next = !item.pinned;
+      const updated = await api.setHistoryPinned(item.id, next);
+      patchItem(updated);
+      setStatus(next ? "已钉住" : "已取消钉住", "ok");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error), "err");
+    }
+  }
+
+  async function toggleFavorited(item: HistoryItem): Promise<boolean> {
+    try {
+      const next = !item.favorited;
+      const updated = await api.setHistoryFavorited(item.id, next);
+      patchItem(updated);
+      setStatus(next ? "已收藏 · 可写备注便于搜索" : "已取消收藏", "ok");
+      return next;
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error), "err");
+      return !!item.favorited;
+    }
+  }
+
+  async function saveNote(item: HistoryItem, note: string): Promise<boolean> {
+    try {
+      const updated = await api.setHistoryNote(item.id, note);
+      patchItem(updated);
+      const has = !!(updated.note && updated.note.trim());
+      setStatus(has ? "备注已保存" : "备注已清除", "ok");
+      return true;
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error), "err");
+      return false;
     }
   }
 
@@ -396,16 +479,34 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     }
   }
 
-  async function clearAll() {
-    if (items.value.length === 0) return;
+  /**
+   * Clear history by mode.
+   * - keep_saved: remove only non-pinned & non-favorited
+   * - keep_favorites: remove non-favorited
+   * - all: remove everything (caller should confirm if favorites exist)
+   */
+  async function clearHistory(
+    mode: "keep_saved" | "keep_favorites" | "all",
+  ): Promise<number> {
+    if (items.value.length === 0) return 0;
     try {
-      await api.clearHistory();
+      const n = await api.clearHistory(mode);
       builtinCache.clear();
       pluginCache.clear();
       await loadHistory({ silent: true });
-      setStatus("已清空历史", "ok");
+      if (n === 0) {
+        setStatus("没有可清空的记录", "muted");
+      } else if (mode === "all") {
+        setStatus(`已全部清空 · ${n} 条`, "ok");
+      } else if (mode === "keep_favorites") {
+        setStatus(`已清空未收藏 · ${n} 条`, "ok");
+      } else {
+        setStatus(`已清空普通记录 · ${n} 条（保留钉住/收藏）`, "ok");
+      }
+      return n;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error), "err");
+      return 0;
     }
   }
 
@@ -479,8 +580,11 @@ export function useHistory(setStatus: (msg: string, tone?: "muted" | "ok" | "err
     formatBadge,
     loadHistory,
     deleteItem,
+    togglePinned,
+    toggleFavorited,
+    saveNote,
     copyItem,
-    clearAll,
+    clearHistory,
     applySuggestion,
     applyAndCopySuggestion,
     showOriginal,
