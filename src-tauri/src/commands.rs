@@ -415,13 +415,15 @@ pub fn register_app_hotkeys(
     Ok(())
 }
 
-/// Recent history for the paste popup (max 12).
+/// Recent history for the paste popup (max 50). Optional `query` filters by preview/text/note.
 #[tauri::command]
 pub fn list_paste_history(
     app: AppHandle,
     state: State<'_, AppState>,
+    query: Option<String>,
 ) -> Result<Vec<HistoryItem>, String> {
-    let items = paste_popup::list_for_paste(&state)?;
+    let q = query.unwrap_or_default();
+    let items = paste_popup::list_for_paste(&state, &q)?;
     paste_popup::resize_paste_window(&app, items.len());
     Ok(items)
 }

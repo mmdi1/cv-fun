@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { nextTick, onMounted, onUnmounted, ref } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import * as api from "./api";
 import type { HistoryItem } from "./core/types";
 
@@ -13,8 +13,13 @@ const thumbs = ref<Record<string, string>>({});
 const busy = ref(false);
 const empty = ref(false);
 const listEl = ref<HTMLElement | null>(null);
+const searchInputEl = ref<HTMLInputElement | null>(null);
+const query = ref("");
+/** Highlighted row: 0..items-1, or items.length for 「查看更多」 */
+const activeIndex = ref(0);
 
 const unlisteners: UnlistenFn[] = [];
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
 function truncatePreview(text: string): string {
   const t = (text || "").replace(/\s+/g, " ").trim();
@@ -31,25 +36,47 @@ function isMac(): boolean {
 
 function shortcutHint(index: number): string {
   if (index >= 9) return "";
-  // macOS: ⌘1–9 · Windows: Ctrl+1–9
   return isMac() ? `⌘${index + 1}` : `^${index + 1}`;
 }
 
-/** Always start from the first history row when the popup opens. */
-function resetScrollToTop() {
+/** Max selectable index: last item, or 「查看更多」 row after items. */
+function maxSelectIndex(): number {
+  // Always have "查看更多" as last selectable row
+  return items.value.length;
+}
+
+function clampActive() {
+  const max = maxSelectIndex();
+  if (activeIndex.value < 0) activeIndex.value = 0;
+  if (activeIndex.value > max) activeIndex.value = max;
+}
+
+function scrollActiveIntoView() {
   void nextTick(() => {
-    const el = listEl.value;
-    if (el) el.scrollTop = 0;
+    const list = listEl.value;
+    if (!list) return;
+    const row = list.querySelector<HTMLElement>(`[data-idx="${activeIndex.value}"]`);
+    row?.scrollIntoView({ block: "nearest" });
+  });
+}
+
+function focusSearch() {
+  void nextTick(() => {
+    searchInputEl.value?.focus();
+    searchInputEl.value?.select();
   });
 }
 
 async function loadList() {
   try {
-    const list = await api.listPasteHistory();
+    const list = await api.listPasteHistory(query.value.trim());
     items.value = list.slice(0, MAX_ITEMS);
     empty.value = items.value.length === 0;
-    resetScrollToTop();
-    // Resolve image thumbnails (best-effort)
+    activeIndex.value = 0;
+    clampActive();
+    void nextTick(() => {
+      if (listEl.value) listEl.value.scrollTop = 0;
+    });
     const next: Record<string, string> = {};
     await Promise.all(
       items.value
@@ -64,13 +91,25 @@ async function loadList() {
         }),
     );
     thumbs.value = next;
-    // Thumbs may reflow layout — keep list pinned to top.
-    resetScrollToTop();
+    scrollActiveIntoView();
   } catch {
     items.value = [];
     empty.value = true;
+    activeIndex.value = 0;
   }
 }
+
+function scheduleSearch() {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    searchTimer = null;
+    void loadList();
+  }, 80);
+}
+
+watch(query, () => {
+  scheduleSearch();
+});
 
 async function pasteAt(index: number) {
   if (busy.value) return;
@@ -82,6 +121,14 @@ async function pasteAt(index: number) {
   } catch {
     busy.value = false;
   }
+}
+
+async function activateSelection() {
+  if (activeIndex.value >= items.value.length) {
+    await onMore();
+    return;
+  }
+  await pasteAt(activeIndex.value);
 }
 
 async function onMore() {
@@ -100,12 +147,39 @@ async function dismiss() {
   }
 }
 
+function moveActive(delta: number) {
+  const max = maxSelectIndex();
+  if (max < 0) return;
+  let next = activeIndex.value + delta;
+  if (next < 0) next = max;
+  if (next > max) next = 0;
+  activeIndex.value = next;
+  scrollActiveIntoView();
+}
+
 function onKeydown(e: KeyboardEvent) {
   if (e.key === "Escape") {
     e.preventDefault();
     void dismiss();
     return;
   }
+
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    moveActive(1);
+    return;
+  }
+  if (e.key === "ArrowUp") {
+    e.preventDefault();
+    moveActive(-1);
+    return;
+  }
+  if (e.key === "Enter") {
+    e.preventDefault();
+    void activateSelection();
+    return;
+  }
+
   // Cmd/Ctrl + 1..9 → paste that row
   const mod = e.metaKey || e.ctrlKey;
   if (!mod || e.altKey || e.shiftKey) return;
@@ -117,18 +191,24 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
+function onShow() {
+  busy.value = false;
+  query.value = "";
+  activeIndex.value = 0;
+  void loadList().then(() => focusSearch());
+}
+
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
-  void loadList();
+  void loadList().then(() => focusSearch());
   void listen("paste-popup-show", () => {
-    busy.value = false;
-    resetScrollToTop();
-    void loadList();
+    onShow();
   }).then((u) => unlisteners.push(u));
 });
 
 onUnmounted(() => {
   window.removeEventListener("keydown", onKeydown);
+  if (searchTimer) clearTimeout(searchTimer);
   for (const u of unlisteners) u();
 });
 </script>
@@ -136,8 +216,18 @@ onUnmounted(() => {
 <template>
   <div class="paste-root" @contextmenu.prevent>
     <header class="paste-head">
-      <span class="paste-title">快速粘贴</span>
-      <span class="paste-hint">{{ isMac() ? "⌘1–9" : "Ctrl+1–9" }} · Esc</span>
+      <input
+        ref="searchInputEl"
+        v-model="query"
+        class="paste-search"
+        type="search"
+        enterkeyhint="go"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="快速搜索…"
+        @keydown.stop="onKeydown"
+      />
+      <span class="paste-hint">↑↓ · Enter · Esc</span>
     </header>
 
     <ul v-if="items.length" ref="listEl" class="paste-list">
@@ -145,8 +235,10 @@ onUnmounted(() => {
         v-for="(item, i) in items"
         :key="item.id"
         class="paste-row"
-        :class="{ image: item.kind === 'image' }"
+        :class="{ image: item.kind === 'image', active: activeIndex === i }"
+        :data-idx="i"
         @click="pasteAt(i)"
+        @mouseenter="activeIndex = i"
       >
         <span class="idx">{{ i + 1 }}</span>
         <template v-if="item.kind === 'image'">
@@ -165,12 +257,31 @@ onUnmounted(() => {
         </template>
         <span v-if="shortcutHint(i)" class="kbd">{{ shortcutHint(i) }}</span>
       </li>
+      <li
+        class="paste-row more-row"
+        :class="{ active: activeIndex === items.length }"
+        :data-idx="items.length"
+        @click="onMore"
+        @mouseenter="activeIndex = items.length"
+      >
+        <span class="idx" />
+        <span class="label more-label">查看更多 →</span>
+      </li>
     </ul>
     <div v-else class="paste-empty">
-      {{ empty ? "暂无历史记录" : "加载中…" }}
+      {{ empty ? (query.trim() ? "无匹配记录" : "暂无历史记录") : "加载中…" }}
+      <button
+        v-if="empty"
+        type="button"
+        class="paste-more-inline"
+        :class="{ active: activeIndex === 0 }"
+        data-idx="0"
+        @click="onMore"
+        @mouseenter="activeIndex = 0"
+      >
+        查看更多 →
+      </button>
     </div>
-
-    <button type="button" class="paste-more" @click="onMore">查看更多 →</button>
   </div>
 </template>
 
@@ -204,23 +315,45 @@ body,
 .paste-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px 6px;
+  padding: 8px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   flex-shrink: 0;
 }
 
-.paste-title {
-  font-weight: 650;
-  font-size: 12px;
-  letter-spacing: 0.02em;
-  color: #c5d0d8;
+.paste-search {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.28);
+  color: #e8edf2;
+  font: inherit;
+  font-size: 13px;
+  padding: 0 10px;
+  outline: none;
+}
+
+.paste-search::placeholder {
+  color: #6b7782;
+}
+
+.paste-search:focus {
+  border-color: rgba(62, 207, 173, 0.55);
+  box-shadow: 0 0 0 2px rgba(62, 207, 173, 0.12);
+}
+
+/* Hide native search clear on some browsers for cleaner look */
+.paste-search::-webkit-search-cancel-button {
+  -webkit-appearance: none;
 }
 
 .paste-hint {
-  font-size: 11px;
-  color: #6b7782;
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #5a6570;
+  white-space: nowrap;
 }
 
 .paste-list {
@@ -231,9 +364,8 @@ body,
   overflow-y: auto;
   flex: 1;
   min-height: 0;
-  /* Hide scrollbar, keep wheel/trackpad scroll */
-  scrollbar-width: none; /* Firefox */
-  -ms-overflow-style: none; /* legacy Edge */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
 .paste-list::-webkit-scrollbar {
@@ -253,8 +385,14 @@ body,
   transition: background 0.08s ease;
 }
 
-.paste-row:hover {
-  background: rgba(62, 207, 173, 0.12);
+.paste-row:hover,
+.paste-row.active {
+  background: rgba(62, 207, 173, 0.14);
+}
+
+.paste-row.active {
+  outline: 1px solid rgba(62, 207, 173, 0.35);
+  outline-offset: -1px;
 }
 
 .idx {
@@ -292,6 +430,11 @@ body,
   color: #e8edf2;
 }
 
+.more-label {
+  color: #3ecfad;
+  font-weight: 600;
+}
+
 .kbd {
   flex-shrink: 0;
   font-size: 10px;
@@ -302,27 +445,30 @@ body,
 
 .paste-empty {
   flex: 1;
-  display: grid;
-  place-content: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   color: #6b7782;
   font-size: 12px;
   padding: 16px;
 }
 
-.paste-more {
-  flex-shrink: 0;
+.paste-more-inline {
   border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
   background: transparent;
   color: #3ecfad;
-  font-size: 12px;
+  font: inherit;
   font-weight: 600;
-  padding: 9px 12px;
+  font-size: 12px;
   cursor: pointer;
-  text-align: left;
+  padding: 6px 10px;
+  border-radius: 6px;
 }
 
-.paste-more:hover {
-  background: rgba(62, 207, 173, 0.08);
+.paste-more-inline:hover,
+.paste-more-inline.active {
+  background: rgba(62, 207, 173, 0.12);
 }
 </style>

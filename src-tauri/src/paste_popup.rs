@@ -648,12 +648,12 @@ pub fn paste_history_item(app: &AppHandle, state: &AppState, id: &str) -> Result
     Ok(())
 }
 
-/// Lightweight list for the paste popup (max 50 items).
-pub fn list_for_paste(state: &AppState) -> Result<Vec<HistoryItem>, String> {
+/// Lightweight list for the paste popup (max 50 items). Optional search query.
+pub fn list_for_paste(state: &AppState, query: &str) -> Result<Vec<HistoryItem>, String> {
     let items = state
         .store
         .lock()
-        .list("")
+        .list(query)
         .map_err(|e| e.to_string())?;
     Ok(items.into_iter().take(PASTE_LIST_LIMIT).collect())
 }

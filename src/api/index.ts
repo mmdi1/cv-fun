@@ -115,9 +115,9 @@ export function showMainWindow() {
   return invoke<void>("show_main_window");
 }
 
-/** Recent history for quick-paste popup (max 12). */
-export function listPasteHistory() {
-  return invoke<HistoryItem[]>("list_paste_history");
+/** Recent history for quick-paste popup (max 50). Optional search query. */
+export function listPasteHistory(query = "") {
+  return invoke<HistoryItem[]>("list_paste_history", { query });
 }
 
 export function hidePastePopup() {
