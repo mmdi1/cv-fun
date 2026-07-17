@@ -1,0 +1,217 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0. Defaults to v<tauri version>."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  WINDOWS_ASSET_NAME: fun-cv-windows-x64-setup.exe
+
+jobs:
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          tag="${{ inputs.tag }}"
+          if [[ -z "$tag" ]]; then
+            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              tag="${GITHUB_REF_NAME}"
+            else
+              tag="v${version}"
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create release if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --target "${GITHUB_SHA}" \
+              --notes "Release $TAG"
+          fi
+
+  build-macos:
+    name: Build macOS (${{ matrix.arch_label }})
+    runs-on: ${{ matrix.os }}
+    needs: prepare-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_label: Apple Silicon
+            os: macos-latest
+            uname_arch: arm64
+            bundle_arch: aarch64
+            asset_name: fun-cv-macos-aarch64.dmg
+          - arch_label: Intel
+            os: macos-15-intel
+            uname_arch: x86_64
+            bundle_arch: x64
+            asset_name: fun-cv-macos-x64.dmg
+    env:
+      MAC_ASSET_NAME: ${{ matrix.asset_name }}
+      MAC_BUNDLE_ARCH: ${{ matrix.bundle_arch }}
+      EXPECTED_UNAME_ARCH: ${{ matrix.uname_arch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup update stable
+          rustup default stable
+
+      - name: Run Rust tests
+        run: npm run test:rust
+
+      - name: Build macOS bundle
+        run: npm run tauri -- build
+
+      - name: Prepare macOS release asset
+        id: asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          product_name="$(node -p "require('./src-tauri/tauri.conf.json').productName")"
+          actual_arch="$(uname -m)"
+          if [[ "$actual_arch" != "$EXPECTED_UNAME_ARCH" ]]; then
+            echo "Expected macOS runner arch $EXPECTED_UNAME_ARCH, got $actual_arch" >&2
+            exit 1
+          fi
+          source="src-tauri/target/release/bundle/dmg/${product_name}_${version}_${MAC_BUNDLE_ARCH}.dmg"
+          test -f "$source"
+          mkdir -p release-assets
+          cp "$source" "release-assets/${MAC_ASSET_NAME}"
+          echo "path=release-assets/${MAC_ASSET_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MAC_ASSET_NAME }}
+          path: ${{ steps.asset.outputs.path }}
+
+      - name: Upload macOS asset to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+          ASSET_PATH: ${{ steps.asset.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release delete-asset "$TAG" "$MAC_ASSET_NAME" -y >/dev/null 2>&1 || true
+          gh release upload "$TAG" "$ASSET_PATH"
+
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    needs: prepare-release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Setup Rust
+        shell: pwsh
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Ensure NSIS
+        shell: pwsh
+        run: |
+          if (!(Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+            $env:PATH += ";C:\Program Files (x86)\NSIS"
+          }
+          makensis /VERSION
+
+      - name: Run Rust tests
+        run: npm run test:rust
+
+      - name: Build Windows bundle
+        run: npm run tauri -- build
+
+      - name: Prepare Windows release asset
+        id: asset
+        shell: pwsh
+        run: |
+          $version = node -p "require('./src-tauri/tauri.conf.json').version"
+          $productName = node -p "require('./src-tauri/tauri.conf.json').productName"
+          $source = "src-tauri/target/release/bundle/nsis/${productName}_${version}_x64-setup.exe"
+          if (!(Test-Path $source)) {
+            throw "Windows installer not found: $source"
+          }
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $target = "release-assets/${env:WINDOWS_ASSET_NAME}"
+          Copy-Item $source $target -Force
+          "path=$target" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.WINDOWS_ASSET_NAME }}
+          path: ${{ steps.asset.outputs.path }}
+
+      - name: Upload Windows asset to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+          ASSET_PATH: ${{ steps.asset.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release delete-asset "$TAG" "$WINDOWS_ASSET_NAME" -y >/dev/null 2>&1 || true
+          gh release upload "$TAG" "$ASSET_PATH"
